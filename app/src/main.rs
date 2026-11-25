@@ -294,13 +294,45 @@ async fn recycle(handle: tauri::AppHandle, items: Vec<ToRecycle>) -> Res<Recycle
                     continue;
                 }
             };
+            // A file that changed since the scan is left alone: what Sift said about it may no
+            // longer be true.
+            let changed = app.last.lock().unwrap().as_ref().and_then(|r| {
+                let want = it.path.to_lowercase();
+                r.files
+                    .iter()
+                    .find(|f| f.path.to_lowercase() == want)
+                    .map(|f| {
+                        let modified = meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        f.size != meta.len() || f.modified != modified
+                    })
+            });
+            if changed == Some(true) {
+                failed.push(Failed {
+                    path: it.path,
+                    error: "It changed since the scan. Scan again first.".into(),
+                });
+                continue;
+            }
             match trash::delete(&it.path) {
                 Ok(()) => {
-                    let _ = app
-                        .db
-                        .lock()
-                        .unwrap()
-                        .log_removal(&it.path, meta.len(), &it.reason);
+                    let logged =
+                        app.db
+                            .lock()
+                            .unwrap()
+                            .log_removal(&it.path, meta.len(), &it.reason);
+                    if let Err(e) = logged {
+                        failed.push(Failed {
+                            path: it.path.clone(),
+                            error: format!(
+                                "Moved to the Recycle Bin, but not written in History: {e}"
+                            ),
+                        });
+                    }
                     moved.push(it.path);
                 }
                 Err(e) => failed.push(Failed {

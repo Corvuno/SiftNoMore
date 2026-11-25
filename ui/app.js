@@ -487,7 +487,11 @@ function renderOld(main) {
 
   const refilter = () => {
     rows = oldRows();
+    // Only what is shown stays selected, so nothing hidden can go along unseen.
+    const shownIds = new Set(rows.map((o) => o.file));
+    for (const id of [...st.sel]) if (!shownIds.has(id)) st.sel.delete(id);
     st.focus = -1;
+    st.anchor = -1;
     list = virtualList(scroller, rows.length, rowHtml);
     if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No file matches these filters.</p></div>';
     changed();
@@ -634,7 +638,13 @@ function renderDupes(main) {
   const empty = () => { if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No group matches these filters.</p></div>'; };
   empty();
 
-  const refilter = () => { build(); st.focus = -1; list = virtualList(scroller, rows.length, rowHtml); empty(); updateSel(); };
+  const refilter = () => {
+    build();
+    const shownIds = new Set(visibleIds());
+    for (const id of [...st.sel]) if (!shownIds.has(id)) st.sel.delete(id);
+    st.focus = -1;
+    st.anchor = -1;
+    list = virtualList(scroller, rows.length, rowHtml); empty(); updateSel(); };
   $('#q', main).oninput = (e) => { st.query = e.target.value; refilter(); };
   $('#minSize', main).oninput = (e) => { st.minSize = Number(e.target.value); $('#minSizeOut', main).textContent = sizeStepLabel(st.minSize); refilter(); };
   main.querySelectorAll('[data-gkind]').forEach((b) => (b.onclick = () => { st.kinds.has(b.dataset.gkind) ? st.kinds.delete(b.dataset.gkind) : st.kinds.add(b.dataset.gkind); b.classList.toggle('on'); refilter(); }));
@@ -669,12 +679,12 @@ function confirmRecycle(st, kind) {
   const picked = new Set(ids);
   const whole = S.result.groups.filter((g) => g.files.length >= 2 && g.files.every((id) => picked.has(id)));
   const d = $('#confirm');
-  const shown = ids.slice(0, 300);
+  const shown = ids;
   d.innerHTML = `<div class="dh"><h2>Move ${nf.format(ids.length)} file${ids.length === 1 ? '' : 's'} to the Recycle Bin?</h2>
       <p>${size(bytes)}. You can put them back from History or from the Recycle Bin.</p></div>
     ${whole.length ? `<div class="warnbox">In ${whole.length} duplicate group${whole.length === 1 ? '' : 's'} every file is selected, so none of that file stays: ${whole.slice(0, 3).map((g) => '“' + esc(g.label) + '”').join(', ')}${whole.length > 3 ? '…' : ''}</div>` : ''}
     <div class="dl">${shown.map((id) => { const f = S.files.get(id); return `<div><span class="n" title="${esc(f.path)}">${esc(f.path)}</span><span class="s">${size(f.size)}</span></div>`; }).join('')}
-      ${ids.length > shown.length ? `<div><span class="n muted">and ${nf.format(ids.length - shown.length)} more</span></div>` : ''}</div>
+</div>
     <div class="df"><button class="btn" id="dCancel">Cancel</button><button class="btn danger" id="dGo">Move to Recycle Bin</button></div>`;
   d.showModal();
   $('#dCancel', d).focus();
