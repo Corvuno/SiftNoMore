@@ -33,20 +33,23 @@
     const id = add(`file-${n}.${ext}`, D + (n % 3 ? '\\Old stuff' : ''), Math.round(Math.random() * 3e8), 6 + (n % 40), kind, n % 4 ? 'example.com' : undefined);
     old.push({ file: id, signals: [{ type: 'untouched', months: 6 + (n % 40) }] });
   }
-  groups.push({ kind: 'sameContent', files: [g, f], suggested: g, label: 'setup.exe' });
-  groups.push({ kind: 'sameContent', files: [h, i], suggested: h, label: 'Belastingaangifte 2022.pdf' });
+  groups.push({ kind: 'copies', files: [g, f], suggested: g, label: 'setup.exe', fingerprint: '9e107d9d372bb6826bd81d3542a419d6' });
+  groups.push({ kind: 'copies', files: [h, i], suggested: h, label: 'Belastingaangifte 2022.pdf', fingerprint: 'e4d909c290d0fb1ca068ffaddf22cbd0' });
+  const w1 = add('WindowsClient.zip', D, 6.4e6, 60, 'archive', 'github.com');
+  const w2 = add('0.9.5 ValheimPlus Windows Client-4-0-9-5-1-1615635599.zip', D, 6.4e6, 60, 'archive', 'nexusmods.com');
+  groups.push({ kind: 'sameContent', files: [w2, w1], suggested: w2, label: w2 === 0 ? '' : '0.9.5 ValheimPlus Windows Client-4-0-9-5-1-1615635599.zip', fingerprint: 'd41d8cd98f00b204e9800998ecf8427e' });
   groups.push({ kind: 'versions', files: [a, b], suggested: b, label: 'vlc' });
   const m1 = add('report.docx', D, 120e3, 4, 'document');
   const m2 = add('report (1).docx', D, 131e3, 3, 'document');
   const m3 = add('report (2).docx', D, 133e3, 2, 'document');
-  groups.push({ kind: 'copies', files: [m1, m2, m3], suggested: m1, label: 'report.docx' });
+  groups.push({ kind: 'sameName', files: [m1, m2, m3], suggested: m3, label: 'report.docx' });
   const s1 = add('invoice-march.pdf', D, 80e3, 4, 'document');
   const s2 = add('invoice-march.pdf', 'C:\\Users\\Kuno\\Desktop', 81e3, 3, 'document');
   groups.push({ kind: 'sameName', files: [s1, s2], suggested: s2, label: 'invoice-march.pdf' });
   for (let n = 0; n < 300; n++) {
     const x = add(`movie-${n}.mkv`, 'D:\\Films', 1.4e9, 12, 'video');
     const y = add(`movie-${n}.mkv`, 'E:\\Backup\\Films', 1.4e9, 30, 'video');
-    groups.push({ kind: 'sameContent', files: [x, y], suggested: y, label: `movie-${n}.mkv` });
+    groups.push({ kind: 'copies', files: [x, y], suggested: y, label: `movie-${n}.mkv` });
   }
   let result = { startedAt: now - 7300, finishedAt: now - 7200, folders: [D], files, old, groups, stats: { filesSeen: 48211, bytesSeen: 312e9, foldersSeen: 3100, unreadable: 0, hashedBytes: 9e9 }, cancelled: false };
   const ov = {

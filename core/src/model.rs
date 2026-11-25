@@ -85,15 +85,16 @@ pub struct OldItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[serde(rename_all = "camelCase")]
 pub enum GroupKind {
-    /// Byte for byte the same.
-    SameContent,
-    /// Names with copy marks: "setup (1).exe", "report - Copy.pdf".
+    /// Duplicates: byte for byte the same, and the same name apart from copy marks
+    /// ("setup.exe", "setup (1).exe", "report - Copy.pdf").
     Copies,
-    /// Different versions of one thing: "vlc-3.0.18.exe", "vlc-3.0.20.exe".
+    /// Duplicates: versions of one installer ("vlc-3.0.18.exe", "vlc-3.0.20.exe").
     Versions,
-    /// The exact same name in different folders, different content.
+    /// Not sure: byte for byte the same, but under unrelated names.
+    SameContent,
+    /// Not sure: the same name (copy marks aside), different content.
     SameName,
-    /// Names that are nearly the same.
+    /// Not sure: names that are nearly the same.
     SimilarName,
 }
 

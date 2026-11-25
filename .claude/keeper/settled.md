@@ -58,3 +58,14 @@ smallest / shortest name / shortest path / Sift's pick in every group" buttons; 
 extension, folder, origin (each a list with counts), a size range and a date range; same-content
 groups are now also compared byte for byte, and show their fingerprint on hover; "From" shows the
 full recorded addresses on hover; similar names start at 95%.
+
+### What a duplicate is (owner, 2026-11-25)
+
+"It should find things that are the same. So exactly the same name and same MD5 with a 1 or
+something in it that denotes it's a duplicate, that's a duplicate. Same name with like, same
+content, same installer with a different version number, that's the same."
+So the Duplicates list holds only: Copies (same bytes AND the same name, copy marks aside) and
+Installer versions. Same bytes under unrelated names, the same name with other content, and
+similar names are "not sure": hidden until asked for. Unpacked archives say where their contents
+are ("Unpacked in <folder>"). Program folders are not skipped (Claude's call, the owner said
+"you tell me"); the Folder filter and Skip list cover that.

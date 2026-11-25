@@ -284,3 +284,5 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 @media (prefers-reduced-motion: reduce) {
   .bar.busy i { animation: none; width: 100%; opacity: .6; }
 }
+
+.chipsep { width: 1px; align-self: stretch; background: var(--line-strong); margin: 2px 6px; }

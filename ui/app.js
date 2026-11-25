@@ -17,7 +17,7 @@ const S = {
   scanning: false,
   progress: null,
   old: { f: null, reasons: new Set(), sort: { key: 'size', asc: false }, sel: new Set(), focus: -1, anchor: -1 },
-  dupes: { f: null, kinds: new Set(), sel: new Set(), focus: -1, anchor: -1 },
+  dupes: { f: null, kinds: new Set(), notSure: false, sel: new Set(), focus: -1, anchor: -1 },
 };
 
 const setting = (k) => {
@@ -60,17 +60,19 @@ const KIND_LABEL = { installer: 'Programs & installers', archive: 'Archives', do
 const REASON = {
   untouched: { label: 'Unused', text: (s) => `Unused ${s.months} months`, tip: () => 'Not opened or changed in that time' },
   installed: { label: 'Installed already', text: () => 'Installed already', tip: (s) => `Installer of “${s.program}”, which is installed` },
-  unpacked: { label: 'Already unpacked', text: () => 'Already unpacked', tip: (s) => `Its contents are in ${s.folder}` },
+  unpacked: { label: 'Already unpacked', text: (s) => `Unpacked in ${s.folder.split(/[\\/]/).filter(Boolean).pop() || s.folder}`, tip: (s) => `What is inside is already on disk, in ${s.folder}` },
   oldArchive: { label: 'Old archive', text: (s) => `Archive, ${s.months} months old`, tip: () => 'An archive older than the limit in Settings' },
   superseded: { label: 'Newer version here', text: () => 'Newer version here', tip: (s) => `A newer version is here: ${s.newer}` },
 };
 
+// Duplicates are what a person means by one: the same file twice (same bytes, same name apart
+// from a copy mark), or an older version of the same installer. The rest is "not sure".
 const GROUP = {
-  sameContent: { label: 'Same content', tip: 'Byte for byte the same file' },
-  copies: { label: 'Copies', tip: 'Names with a copy mark, like “(1)” or “- Copy”' },
-  versions: { label: 'Versions', tip: 'Different versions of the same thing' },
-  sameName: { label: 'Same name', tip: 'The same name in different folders, different content' },
-  similarName: { label: 'Similar names', tip: 'Names that are nearly the same' },
+  copies: { label: 'Copies', main: true, tip: 'Byte for byte the same, with the same name or a copy mark like “1”, “(1)” or “- Copy”' },
+  versions: { label: 'Installer versions', main: true, tip: 'Installers of the same program with different version numbers' },
+  sameContent: { label: 'Same content, other name', tip: 'Byte for byte the same, but the names are unrelated. Could be a renamed copy, or files that happen to be equal.' },
+  sameName: { label: 'Same name, other content', tip: 'The same name (copy marks aside), but the content differs: perhaps changed later' },
+  similarName: { label: 'Similar names', tip: 'Names that are nearly the same, content differs' },
 };
 
 let toastTimer = null;
@@ -113,7 +115,7 @@ function renderSide() {
   document.querySelectorAll('.navitem').forEach((b) => b.classList.toggle('on', b.dataset.view === S.view));
   const r = S.result;
   $('#countOld').textContent = r ? nf.format(r.old.length) : '';
-  $('#countDupes').textContent = r ? nf.format(r.groups.length) : '';
+  $('#countDupes').textContent = r ? nf.format(r.groups.filter((g) => GROUP[g.kind] && GROUP[g.kind].main).length) : '';
   const btn = $('#scanBtn');
   const info = $('#scanInfo');
   const bar = $('#scanBar');
@@ -713,7 +715,7 @@ function dupBase() {
 function groupsShown() {
   const st = S.dupes;
   return S.result.groups.filter((g) => {
-    if (st.kinds.size && !st.kinds.has(g.kind)) return false;
+    if (st.kinds.size ? !st.kinds.has(g.kind) : !(GROUP[g.kind].main || st.notSure)) return false;
     const fs = g.files.map((id) => S.files.get(id)).filter(Boolean);
     if (fs.length < 2) return false;
     return fs.some((f) => fileMatches(f, st.f, (x) => x.modified));
@@ -743,15 +745,21 @@ function renderDupes(main) {
   const r = S.result;
   const counts = {};
   for (const g of r.groups) counts[g.kind] = (counts[g.kind] || 0) + 1;
-  const totalFree = r.groups.filter((g) => g.kind === 'sameContent').reduce((a, g) => a + freeable(g), 0);
-  const chips = Object.keys(GROUP).filter((k) => counts[k]).map((k) =>
-    `<button class="chipbtn ${st.kinds.has(k) ? 'on' : ''}" data-gkind="${k}" title="${esc(GROUP[k].tip)}">${GROUP[k].label}<span class="n">${nf.format(counts[k])}</span></button>`).join('');
+  const mainCount = r.groups.filter((g) => GROUP[g.kind].main).length;
+  const notSureCount = r.groups.length - mainCount;
+  const totalFree = r.groups.filter((g) => g.kind === 'copies').reduce((a, g) => a + freeable(g), 0);
+  const chip = (k) => `<button class="chipbtn ${st.kinds.has(k) ? 'on' : ''}" data-gkind="${k}" title="${esc(GROUP[k].tip)}">${GROUP[k].label}<span class="n">${nf.format(counts[k] || 0)}</span></button>`;
+  const mainKinds = Object.keys(GROUP).filter((k) => GROUP[k].main);
+  const sureKinds = Object.keys(GROUP).filter((k) => !GROUP[k].main && counts[k]);
+  const chips = mainKinds.map(chip).join('') +
+    (notSureCount ? `<span class="chipsep"></span><button class="chipbtn ${st.notSure ? 'on' : ''}" id="notSure" title="Groups that may or may not be duplicates. Hidden unless you ask.">${st.notSure ? 'Hide' : 'Show'} not sure<span class="n">${nf.format(notSureCount)}</span></button>` +
+      (st.notSure || sureKinds.some((k) => st.kinds.has(k)) ? sureKinds.map(chip).join('') : '') : '');
 
-  main.innerHTML = header('Duplicates', `${nf.format(r.groups.length)} groups · byte-for-byte copies alone take ${size(totalFree)}`) +
+  main.innerHTML = header('Duplicates', `${nf.format(mainCount)} groups of duplicates · the extra copies take ${size(totalFree)}` + (notSureCount ? ` · ${nf.format(notSureCount)} more groups not sure` : '')) +
     `<div class="globalkeep" title="In every group shown, the chosen file stays and the others get selected"><span class="muted">Keep in every group:</span>
       ${Object.entries(KEEP_RULES).map(([k, v]) => `<button class="btn small" data-allrule="${k}">${esc(v.label)}</button>`).join('')}
       <span class="grow"></span>
-      <button class="btn small" id="acceptExact" title="Only in same-content groups: select all copies but one">Select all exact copies</button>
+      <button class="btn small" id="acceptExact" title="In every Copies group shown: select all but one">Select all extra copies</button>
       <button class="btn small" id="unselAll">Unselect all</button></div>` +
     filterBarHtml(st.f, 'Changed', chips) + `
     <div class="table" id="table">
@@ -827,6 +835,12 @@ function renderDupes(main) {
   };
   wireFilterBar(main, st.f, dupBase, refilter);
   main.querySelectorAll('[data-gkind]').forEach((b) => (b.onclick = () => { st.kinds.has(b.dataset.gkind) ? st.kinds.delete(b.dataset.gkind) : st.kinds.add(b.dataset.gkind); b.classList.toggle('on'); refilter(); }));
+  const ns = $('#notSure', main);
+  if (ns) ns.onclick = () => {
+    st.notSure = !st.notSure;
+    if (!st.notSure) for (const k of Object.keys(GROUP)) if (!GROUP[k].main) st.kinds.delete(k);
+    render();
+  };
   main.querySelectorAll('[data-allrule]').forEach((b) => (b.onclick = () => {
     applyKeepRule(groups, b.dataset.allrule);
     list.redraw(); updateSel();
@@ -834,10 +848,10 @@ function renderDupes(main) {
   }));
   $('#unselAll', main).onclick = () => { st.sel.clear(); list.redraw(); updateSel(); };
   $('#acceptExact', main).onclick = () => {
-    const exact = groups.filter((g) => g.kind === 'sameContent');
+    const exact = groups.filter((g) => g.kind === 'copies');
     applyKeepRule(exact, 'suggested');
     list.redraw(); updateSel();
-    toast(exact.length ? `Selected the extra copies in ${nf.format(exact.length)} same-content groups. One of each stays.` : 'No same-content groups shown.');
+    toast(exact.length ? `Selected the extra copies in ${nf.format(exact.length)} groups. One of each stays.` : 'No Copies groups shown.');
   };
 }
 

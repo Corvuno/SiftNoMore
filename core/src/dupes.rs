@@ -319,28 +319,59 @@ pub fn find(
 
     let mut groups: Vec<Group> = Vec::new();
 
-    // 1. Same content.
+    // What a person calls a duplicate: the same bytes AND the same name, where the name may
+    // carry a copy mark ("setup.exe", "setup (1).exe", "setup - Copy.exe"). Same bytes under
+    // unrelated names, or the same name with other bytes, are shown apart as "not sure".
+    let base_key = |i: u32| {
+        (
+            parts[i as usize].base.as_str(),
+            parts[i as usize].ext.as_str(),
+        )
+    };
+    let original_first = |i: &u32| {
+        let f = &files[*i as usize];
+        (
+            !f.kept,
+            mark(*i) != CopyMark::None,
+            f.modified,
+            f.path.len(),
+        )
+    };
+
+    // 1. Copies: same content, same name. 2. Same content under other names.
     let (exact, hashed) = same_content(files, settings.min_size, cache, h);
     let mut exact_of: HashMap<u32, usize> = HashMap::new();
     for (gi, (g, md5)) in exact.iter().enumerate() {
         for &id in g {
             exact_of.insert(id, gi);
         }
-        // Keep the one without a copy mark; among those the oldest, which is the original.
-        let suggested = *g
-            .iter()
-            .min_by_key(|&&i| {
-                let f = &files[i as usize];
-                (!f.kept, mark(i) != CopyMark::None, f.modified, f.path.len())
-            })
-            .unwrap();
-        groups.push(Group {
-            kind: crate::model::GroupKind::SameContent,
-            files: g.clone(),
-            suggested,
-            label: group_label(files, suggested),
-            fingerprint: Some(md5.clone()),
-        });
+        let mut by_name: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
+        for &id in g {
+            by_name.entry(base_key(id)).or_default().push(id);
+        }
+        for ids in by_name.values().filter(|ids| ids.len() >= 2) {
+            let suggested = *ids.iter().min_by_key(|i| original_first(i)).unwrap();
+            groups.push(Group {
+                kind: GroupKind::Copies,
+                files: ids.clone(),
+                suggested,
+                label: group_label(files, suggested),
+                fingerprint: Some(md5.clone()),
+            });
+        }
+        if by_name.len() == 1 {
+            continue;
+        }
+        {
+            let suggested = *g.iter().min_by_key(|i| original_first(i)).unwrap();
+            groups.push(Group {
+                kind: GroupKind::SameContent,
+                files: g.clone(),
+                suggested,
+                label: group_label(files, suggested),
+                fingerprint: Some(md5.clone()),
+            });
+        }
     }
     // A name-based group that is wholly one same-content group says nothing new.
     let covered = |ids: &[u32]| -> bool {
@@ -348,60 +379,12 @@ pub fn find(
         first.is_some() && ids.iter().all(|i| exact_of.get(i) == first)
     };
 
-    // 2. Copies by name: "setup.exe", "setup (1).exe", "setup - Copy.exe".
-    let mut by_base: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
-    for f in files.iter().filter(|f| big_enough(f)) {
-        let p = &parts[f.id as usize];
-        if p.base.chars().count() >= 2 {
-            by_base
-                .entry((p.base.as_str(), p.ext.as_str()))
-                .or_default()
-                .push(f.id);
-        }
-    }
-    let mut in_copies: HashSet<u32> = HashSet::new();
-    for ids in by_base.values() {
-        if ids.len() < 2 {
-            continue;
-        }
-        let has_original = ids.iter().any(|&i| mark(i) == CopyMark::None);
-        // A bare trailing number only counts as a copy mark when the unnumbered name is there.
-        let members: Vec<u32> = ids
-            .iter()
-            .copied()
-            .filter(|&i| mark(i) != CopyMark::Weak || has_original)
-            .collect();
-        let marked = members
-            .iter()
-            .filter(|&&i| mark(i) != CopyMark::None)
-            .count();
-        let strong = members
-            .iter()
-            .filter(|&&i| mark(i) == CopyMark::Strong)
-            .count();
-        let valid = members.len() >= 2 && ((has_original && marked >= 1) || strong >= 2);
-        if !valid || covered(&members) {
-            continue;
-        }
-        let mut members = members;
-        members.sort();
-        let suggested = *members
-            .iter()
-            .min_by_key(|&&i| (mark(i) != CopyMark::None, files[i as usize].modified))
-            .unwrap();
-        in_copies.extend(members.iter().copied());
-        groups.push(Group {
-            kind: GroupKind::Copies,
-            label: group_label(files, suggested),
-            files: members,
-            suggested,
-            fingerprint: None,
-        });
-    }
-
-    // 3. Versions: same product and extension, different version numbers.
+    // 3. Versions of one installer: same program, different version numbers.
     let mut by_product: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
-    for f in files.iter().filter(|f| big_enough(f)) {
+    for f in files
+        .iter()
+        .filter(|f| big_enough(f) && f.kind == crate::model::Kind::Installer)
+    {
         let p = &parts[f.id as usize];
         if let (Some(prod), Some(_)) = (&p.product, &p.version) {
             by_product
@@ -441,30 +424,53 @@ pub fn find(
         });
     }
 
-    // 4. The same name in different folders, content not all the same.
-    let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
+    // 4. The same name (copy marks aside) with other content: "report.docx" here and there, or
+    //    "report (1).docx" that was changed later.
+    let mut by_base: HashMap<(&str, &str), Vec<u32>> = HashMap::new();
     for f in files.iter().filter(|f| big_enough(f)) {
-        by_name.entry(f.name.to_lowercase()).or_default().push(f.id);
+        let p = &parts[f.id as usize];
+        if p.base.chars().count() >= 2 {
+            by_base
+                .entry((p.base.as_str(), p.ext.as_str()))
+                .or_default()
+                .push(f.id);
+        }
     }
-    for (name, ids) in &by_name {
-        if ids.len() < 2 || ids.len() > 12 || COMMON_NAMES.contains(&name.as_str()) || covered(ids)
-        {
+    let mut in_same_name: HashSet<u32> = HashSet::new();
+    for ids in by_base.values() {
+        if ids.len() < 2 || ids.len() > 12 {
             continue;
         }
-        let dirs: HashSet<String> = ids
+        let name = files[ids[0] as usize].name.to_lowercase();
+        if COMMON_NAMES.contains(&name.as_str()) {
+            continue;
+        }
+        let has_original = ids.iter().any(|&i| mark(i) == CopyMark::None);
+        // A bare trailing number ("report 2") only counts as a copy mark when the unnumbered
+        // name is there too; otherwise "Chapter 2" and "Chapter 3" would be one name.
+        let mut members: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|&i| mark(i) != CopyMark::Weak || has_original)
+            .collect();
+        if members.len() < 2 || covered(&members) {
+            continue;
+        }
+        let dirs: HashSet<String> = members
             .iter()
             .map(|&i| files[i as usize].dir.to_lowercase())
             .collect();
-        if dirs.len() < 2 {
+        let marked = members.iter().any(|&i| mark(i) != CopyMark::None);
+        if dirs.len() < 2 && !marked {
             continue;
         }
-        let mut ids = ids.clone();
-        ids.sort();
-        let suggested = newest(files, &ids);
+        members.sort();
+        let suggested = newest(files, &members);
+        in_same_name.extend(members.iter().copied());
         groups.push(Group {
             kind: GroupKind::SameName,
             label: group_label(files, suggested),
-            files: ids,
+            files: members,
             suggested,
             fingerprint: None,
         });
@@ -519,7 +525,7 @@ pub fn find(
             // Already told as copies or versions: nothing new to say.
             if ids
                 .iter()
-                .all(|i| in_copies.contains(i) || versioned.contains(i))
+                .all(|i| in_same_name.contains(i) || versioned.contains(i))
                 || covered(&ids)
             {
                 continue;
@@ -615,17 +621,44 @@ mod tests {
             ("e/notes2.txt", b"hello", 20),
         ]);
         let g = run(&f, S);
-        let exact: Vec<&Group> = g
+        // Same bytes and the same name (copy mark aside): a duplicate.
+        let copies: Vec<&Group> = g.iter().filter(|g| g.kind == GroupKind::Copies).collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].files, vec![0, 1]);
+        assert!(copies[0].fingerprint.is_some());
+        // The one without "(1)" is kept, even though it is newer.
+        assert_eq!(copies[0].suggested, 0);
+        // Same bytes, unrelated names: shown apart as "not sure", never as a copy.
+        let other: Vec<&Group> = g
             .iter()
             .filter(|g| g.kind == GroupKind::SameContent)
             .collect();
-        assert_eq!(exact.len(), 2);
-        let movies = exact.iter().find(|g| g.files.contains(&0)).unwrap();
-        assert_eq!(movies.files, vec![0, 1]);
-        // The one without "(1)" is kept, even though it is newer.
-        assert_eq!(movies.suggested, 0);
-        // movie.mkv + movie (1).mkv are all one exact group: no extra "copies" group.
-        assert!(!g.iter().any(|g| g.kind == GroupKind::Copies));
+        assert_eq!(other.len(), 1);
+        assert_eq!(names_of(&f, other[0]), vec!["notes.txt", "notes2.txt"]);
+        // film.mkv differs further on: in no content group.
+        assert!(!g
+            .iter()
+            .any(|g| g.files.contains(&2) && g.fingerprint.is_some()));
+    }
+
+    #[test]
+    fn mixed_names_with_same_content() {
+        // A GitHub download and a renamed mirror copy of it, plus a "(1)" copy.
+        let f = fixture(&[
+            ("WindowsClient.zip", b"same-bytes", 1),
+            ("WindowsClient (1).zip", b"same-bytes", 2),
+            ("0.9.5 ValheimPlus Windows Client-4.zip", b"same-bytes", 3),
+        ]);
+        let g = run(&f, S);
+        let copies: Vec<&Group> = g.iter().filter(|g| g.kind == GroupKind::Copies).collect();
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].files, vec![0, 1]);
+        let other: Vec<&Group> = g
+            .iter()
+            .filter(|g| g.kind == GroupKind::SameContent)
+            .collect();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].files, vec![0, 1, 2]);
     }
 
     #[test]
@@ -649,8 +682,8 @@ mod tests {
     #[test]
     fn copies_by_name() {
         let f = fixture(&[
-            ("setup.exe", b"v1", 1),
-            ("setup (1).exe", b"v2-different", 2),
+            ("tool.exe", b"v1", 1),
+            ("tool (1).exe", b"v2-different", 2),
             ("Report.pdf", b"aaa", 1),
             ("Report - Copy.pdf", b"bbbb", 2),
             ("Chapter 2.pdf", b"c2", 1),
@@ -661,12 +694,14 @@ mod tests {
             ("pack (2).zip", b"x2x", 1),
         ]);
         let g = run(&f, S);
+        // Different content: never a duplicate, only "same name" in the not-sure part.
+        assert!(!g.iter().any(|g| g.kind == GroupKind::Copies));
         let copies: Vec<Vec<String>> = g
             .iter()
-            .filter(|g| g.kind == GroupKind::Copies)
+            .filter(|g| g.kind == GroupKind::SameName)
             .map(|g| names_of(&f, g))
             .collect();
-        assert!(copies.contains(&vec!["setup.exe".into(), "setup (1).exe".into()]));
+        assert!(copies.contains(&vec!["tool.exe".into(), "tool (1).exe".into()]));
         assert!(copies.contains(&vec!["Report.pdf".into(), "Report - Copy.pdf".into()]));
         assert!(copies.contains(&vec!["photo 1.jpg".into(), "photo.jpg".into()]));
         assert!(copies.contains(&vec!["pack (1).zip".into(), "pack (2).zip".into()]));
@@ -676,9 +711,9 @@ mod tests {
             .any(|g| names_of(&f, g).contains(&"Chapter 2.pdf".to_string())));
         let setup = g
             .iter()
-            .find(|g| g.kind == GroupKind::Copies && g.files.contains(&0))
+            .find(|g| g.kind == GroupKind::SameName && g.files.contains(&0))
             .unwrap();
-        assert_eq!(setup.suggested, 0);
+        assert_eq!(setup.files, vec![0, 1]);
     }
 
     #[test]
@@ -762,7 +797,7 @@ mod tests {
             ("1040667.fpmcp", &c, 1),
             ("1229421.fpmcp", &d, 1),
         ]);
-        assert!(run(&f, S).iter().all(|g| g.kind != GroupKind::SameContent));
+        assert!(run(&f, S).iter().all(|g| g.fingerprint.is_none()));
     }
 
     #[test]
@@ -783,7 +818,7 @@ mod tests {
             cache.insert(file.path.clone(), c);
         }
         let (g, _) = find(&f.files, &S, &mut cache, &h);
-        assert!(g.iter().all(|g| g.kind != GroupKind::SameContent));
+        assert!(g.iter().all(|g| g.fingerprint.is_none()));
     }
 
     #[test]
