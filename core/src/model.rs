@@ -52,6 +52,10 @@ pub struct FileEntry {
     /// The website a download came from, read from the mark Windows puts on downloaded files.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The full addresses behind `origin`: the page it was downloaded from and the file's own
+    /// address, as Windows recorded them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_detail: Option<String>,
     /// On the keep-list: shown so a group makes sense, never suggested for removal.
     #[serde(default)]
     pub kept: bool,
@@ -102,6 +106,10 @@ pub struct Group {
     pub suggested: u32,
     /// A short word for what ties the group: the shared name or product.
     pub label: String,
+    /// For same-content groups: the MD5 fingerprint all files share, so it can be checked by hand
+    /// (in Windows: certutil -hashfile <file> MD5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

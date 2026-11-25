@@ -12,7 +12,8 @@ The overview every conversation starts from. One screen; what is no longer true 
 
 ## Weak, in the owner's words
 
-- Not yet tried by the owner on their own PC.
+- First try (2026-11-25): "way to liberal", columns not resizable, no global keep, filters not
+  complete enough. Addressed the same day; waiting for the owner's next try.
 
 ## What the owner wants next, in their order
 

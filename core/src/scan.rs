@@ -124,6 +124,7 @@ pub fn walk(
                 modified,
                 touched,
                 origin: None,
+                origin_detail: None,
                 kept: false,
             });
             if out.stats.files_seen.is_multiple_of(2000) {
@@ -137,13 +138,14 @@ pub fn walk(
 
 /// Reads the website a downloaded file came from. Windows keeps this in a small hidden part of
 /// the file ("Zone.Identifier"). Returns the host, like "github.com", or None.
-pub fn read_origin(path: &str) -> Option<String> {
+pub fn read_origin(path: &str) -> Option<(String, String)> {
     let mark = format!("{path}:Zone.Identifier");
     let bytes = std::fs::read(Path::new(&mark)).ok()?;
     parse_zone_identifier(&String::from_utf8_lossy(&bytes))
 }
 
-pub fn parse_zone_identifier(text: &str) -> Option<String> {
+/// Gives (host to show, the full addresses Windows recorded).
+pub fn parse_zone_identifier(text: &str) -> Option<(String, String)> {
     let mut host_url = None;
     let mut referrer = None;
     for line in text.lines() {
@@ -156,8 +158,18 @@ pub fn parse_zone_identifier(text: &str) -> Option<String> {
     }
     // The referrer is the page you were on; the host URL is often a download server
     // ("objects.githubusercontent.com"), so the page says more about where it came from.
-    let url = referrer.or(host_url)?;
-    host_of(&url)
+    let mut detail = Vec::new();
+    if let Some(r) = &referrer {
+        detail.push(format!("Page: {r}"));
+    }
+    if let Some(h) = &host_url {
+        detail.push(format!("File: {h}"));
+    }
+    let host = referrer
+        .as_deref()
+        .and_then(host_of)
+        .or_else(|| host_url.as_deref().and_then(host_of))?;
+    Some((host, detail.join("\n")))
 }
 
 fn host_of(url: &str) -> Option<String> {
@@ -177,11 +189,14 @@ mod tests {
     #[test]
     fn zone_identifier() {
         let t = "[ZoneTransfer]\r\nZoneId=3\r\nReferrerUrl=https://www.videolan.org/vlc/\r\nHostUrl=https://get.videolan.org/vlc/3.0.20/win64/vlc.exe\r\n";
-        assert_eq!(parse_zone_identifier(t).as_deref(), Some("videolan.org"));
+        let (host, detail) = parse_zone_identifier(t).unwrap();
+        assert_eq!(host, "videolan.org");
+        assert!(detail.contains("Page: https://www.videolan.org/vlc/"));
+        assert!(detail.contains("File: https://get.videolan.org/"));
         let t = "[ZoneTransfer]\nZoneId=3\nHostUrl=https://objects.githubusercontent.com/x\n";
         assert_eq!(
-            parse_zone_identifier(t).as_deref(),
-            Some("objects.githubusercontent.com")
+            parse_zone_identifier(t).unwrap().0,
+            "objects.githubusercontent.com"
         );
         assert_eq!(parse_zone_identifier("[ZoneTransfer]\nZoneId=3\n"), None);
         assert_eq!(parse_zone_identifier("HostUrl=about:internet"), None);

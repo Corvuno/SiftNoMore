@@ -47,3 +47,14 @@ What was built, for the owner to try and overrule:
   pattern, Keep, Move to Recycle Bin (always a confirmation listing every file).
 - Slider defaults: unused 6 months, archives 3 months, duplicates from 1 KB, similar names 90%.
 - Calm neutral surfaces, one teal accent, follows Windows light/dark, Segoe UI.
+
+### After the first try on Windows (2026-11-25)
+
+Owner's words: "Colms need to be resizable. Picking what stays needs global handlers (so save
+all X). Filters need to be way more complete. Its also way to liberal: not everything with the
+same size and extention is the same. Valheim was not on github."
+What changed: columns drag to resize (remembered); a row of "keep the newest / oldest / largest /
+smallest / shortest name / shortest path / Sift's pick in every group" buttons; filters for type,
+extension, folder, origin (each a list with counts), a size range and a date range; same-content
+groups are now also compared byte for byte, and show their fingerprint on hover; "From" shows the
+full recorded addresses on hover; similar names start at 95%.

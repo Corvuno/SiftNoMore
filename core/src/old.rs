@@ -268,6 +268,7 @@ mod tests {
                 modified: now - age_months * MONTH,
                 touched: now - age_months * MONTH,
                 origin: None,
+                origin_detail: None,
                 kept: false,
             }
         };
@@ -289,6 +290,7 @@ mod tests {
             files: vec![4, 5],
             suggested: 5,
             label: "vlc".into(),
+            fingerprint: None,
         }];
         let inst = Installed::new(&["Steam".into()]);
         let old = find(&files, &dirs, &inst, &groups, &OldSettings::default(), now);
@@ -338,6 +340,7 @@ mod tests {
             modified: 0,
             touched: 0,
             origin: None,
+            origin_detail: None,
             kept: false,
         };
         assert_eq!(zip_contents_present(&f), None);

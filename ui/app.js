@@ -7,7 +7,7 @@ const invoke = (cmd, args) => T.core.invoke(cmd, args);
 
 // ---------- State ----------
 
-const DEFAULTS = { untouchedMonths: 6, archiveMonths: 3, minDupeSize: 1024, similarNames: 90 };
+const DEFAULTS = { untouchedMonths: 6, archiveMonths: 3, minDupeSize: 1024, similarNames: 95 };
 
 const S = {
   view: 'old',
@@ -16,8 +16,8 @@ const S = {
   files: new Map(),
   scanning: false,
   progress: null,
-  old: { query: '', kinds: new Set(), reasons: new Set(), minSize: 0, sort: { key: 'size', asc: false }, sel: new Set(), focus: -1, anchor: -1 },
-  dupes: { query: '', kinds: new Set(), minSize: 0, sel: new Set(), focus: -1, anchor: -1, keepRule: 'suggested' },
+  old: { f: null, reasons: new Set(), sort: { key: 'size', asc: false }, sel: new Set(), focus: -1, anchor: -1 },
+  dupes: { f: null, kinds: new Set(), sel: new Set(), focus: -1, anchor: -1 },
 };
 
 const setting = (k) => {
@@ -179,6 +179,7 @@ async function scanOrStop() {
 // ---------- Router ----------
 
 function go(view) {
+  closePopover();
   S.view = view;
   render();
 }
@@ -204,9 +205,6 @@ function noResult(main, title) {
   $('#emptyFolders').onclick = () => go('folders');
 }
 
-// Size filter steps, shared by both result pages.
-const SIZE_STEPS = [0, 1 << 20, 10 << 20, 50 << 20, 100 << 20, 500 << 20, 1 << 30];
-const sizeStepLabel = (i) => (i === 0 ? 'Any size' : '≥ ' + size(SIZE_STEPS[i]));
 
 // ---------- Virtual list ----------
 
@@ -394,20 +392,195 @@ function wireSelbar(main, st, visibleIds, refresh, recycleFn) {
   return update;
 }
 
+// ---------- Filters (shared by both result pages) ----------
+
+const SIZE_STEPS = [0, 1024, 100 * 1024, 1 << 20, 10 << 20, 100 << 20, 1 << 30, 10 * 2 ** 30, Infinity];
+const AGE_STEPS = [0, 1, 7, 30, 91, 182, 365, 730, 1825, Infinity]; // days
+const ageLabel = (d) => (d === 0 || d === Infinity ? 'any' : d < 7 ? d + ' day' : d < 30 ? d / 7 + (d === 7 ? ' week' : ' weeks') : d < 365 ? Math.round(d / 30.4) + (d < 60 ? ' month' : ' months') : d / 365 + (d === 365 ? ' year' : ' years'));
+
+function newFilter() {
+  return { query: '', kinds: new Set(), exts: new Set(), dirs: new Set(), origins: new Set(), sizeMin: 0, sizeMax: SIZE_STEPS.length - 1, olderThan: 0, newerThan: AGE_STEPS.length - 1 };
+}
+S.old.f = newFilter();
+S.dupes.f = newFilter();
+
+const extOf = (f) => (f.ext ? '.' + f.ext : '(no extension)');
+const originOf = (f) => f.origin || '(not known)';
+const FACETS = {
+  kinds: { label: 'Type', of: (f) => f.kind, show: (v) => KIND_LABEL[v] || v },
+  exts: { label: 'Extension', of: extOf, show: (v) => v },
+  dirs: { label: 'Folder', of: (f) => f.dir, show: (v) => v },
+  origins: { label: 'From', of: originOf, show: (v) => v },
+};
+
+function filterActive(F) {
+  return F.query.trim() || F.kinds.size || F.exts.size || F.dirs.size || F.origins.size || F.sizeMin > 0 || F.sizeMax < SIZE_STEPS.length - 1 || F.olderThan > 0 || F.newerThan < AGE_STEPS.length - 1;
+}
+
+// Does one file pass the filters? `dateOf` is the date the age sliders look at.
+function fileMatches(f, F, dateOf) {
+  const q = F.query.trim().toLowerCase();
+  if (q && !f.path.toLowerCase().includes(q)) return false;
+  for (const k of Object.keys(FACETS)) if (F[k].size && !F[k].has(FACETS[k].of(f))) return false;
+  if (f.size < SIZE_STEPS[F.sizeMin] || f.size > SIZE_STEPS[F.sizeMax]) return false;
+  const days = (Date.now() / 1000 - dateOf(f)) / 86400;
+  if (days < AGE_STEPS[F.olderThan]) return false;
+  if (AGE_STEPS[F.newerThan] !== Infinity && days > AGE_STEPS[F.newerThan]) return false;
+  return true;
+}
+
+function filterBarHtml(F, dateWord, chipsHtml) {
+  const pop = (k) => `<button class="btn small popbtn ${F[k].size ? 'on' : ''}" data-pop="${k}">${FACETS[k].label}${F[k].size ? ` <span class="n">${F[k].size}</span>` : ''} ▾</button>`;
+  const sizeLabel = (i, end) => (i === 0 && !end ? 'no minimum' : SIZE_STEPS[i] === Infinity ? 'no maximum' : size(SIZE_STEPS[i]));
+  return `<div class="filters">
+      <label class="search">${SEARCH_ICON}<input id="q" placeholder="Search name or folder" value="${esc(F.query)}"></label>
+      ${pop('kinds')}${pop('exts')}${pop('dirs')}${pop('origins')}
+      <button class="linkbtn" id="clearFilters" ${filterActive(F) ? '' : 'hidden'}>Clear all filters</button>
+    </div>
+    <div class="filters ranges">
+      <div class="slide">Size from <input type="range" id="sizeMin" min="0" max="${SIZE_STEPS.length - 2}" value="${F.sizeMin}"><output id="sizeMinOut">${sizeLabel(F.sizeMin)}</output>
+        to <input type="range" id="sizeMax" min="1" max="${SIZE_STEPS.length - 1}" value="${F.sizeMax}"><output id="sizeMaxOut">${sizeLabel(F.sizeMax, true)}</output></div>
+      <div class="slide">${dateWord} more than <input type="range" id="older" min="0" max="${AGE_STEPS.length - 2}" value="${F.olderThan}"><output id="olderOut">${ageLabel(AGE_STEPS[F.olderThan])}</output>
+        and less than <input type="range" id="newer" min="1" max="${AGE_STEPS.length - 1}" value="${F.newerThan}"><output id="newerOut">${ageLabel(AGE_STEPS[F.newerThan])}</output> ago</div>
+    </div>
+    ${chipsHtml ? `<div class="filters" style="padding-top:0"><div class="chips">${chipsHtml}</div></div>` : ''}`;
+}
+
+// Wires the bar. `baseFiles()` gives the files the choice lists count over.
+function wireFilterBar(main, F, baseFiles, onChange) {
+  const changed = () => {
+    $('#clearFilters', main).hidden = !filterActive(F);
+    onChange();
+  };
+  $('#q', main).oninput = (e) => { F.query = e.target.value; changed(); };
+  const sizeLabel = (i, end) => (i === 0 && !end ? 'no minimum' : SIZE_STEPS[i] === Infinity ? 'no maximum' : size(SIZE_STEPS[i]));
+  const range = (id, key, label, fix) => {
+    $('#' + id, main).oninput = (e) => {
+      F[key] = Number(e.target.value);
+      fix();
+      $('#' + id + 'Out', main).textContent = label(F[key]);
+      changed();
+    };
+  };
+  range('sizeMin', 'sizeMin', (i) => sizeLabel(i), () => { if (F.sizeMax <= F.sizeMin) { F.sizeMax = F.sizeMin + 1; $('#sizeMax', main).value = F.sizeMax; $('#sizeMaxOut', main).textContent = sizeLabel(F.sizeMax, true); } });
+  range('sizeMax', 'sizeMax', (i) => sizeLabel(i, true), () => { if (F.sizeMin >= F.sizeMax) { F.sizeMin = F.sizeMax - 1; $('#sizeMin', main).value = F.sizeMin; $('#sizeMinOut', main).textContent = sizeLabel(F.sizeMin); } });
+  range('older', 'olderThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.newerThan <= F.olderThan) { F.newerThan = F.olderThan + 1; $('#newer', main).value = F.newerThan; $('#newerOut', main).textContent = ageLabel(AGE_STEPS[F.newerThan]); } });
+  range('newer', 'newerThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.olderThan >= F.newerThan) { F.olderThan = F.newerThan - 1; $('#older', main).value = F.olderThan; $('#olderOut', main).textContent = ageLabel(AGE_STEPS[F.olderThan]); } });
+  $('#clearFilters', main).onclick = () => {
+    Object.assign(F, newFilter());
+    render();
+  };
+  main.querySelectorAll('[data-pop]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); openFacet(b, F, b.dataset.pop, baseFiles, () => {
+    const n = F[b.dataset.pop].size;
+    b.classList.toggle('on', n > 0);
+    b.innerHTML = `${FACETS[b.dataset.pop].label}${n ? ` <span class="n">${n}</span>` : ''} ▾`;
+    changed();
+  }); }));
+}
+
+// A list of choices with counts and a search box, under its button.
+function openFacet(btn, F, key, baseFiles, onChange) {
+  closePopover();
+  const counts = new Map();
+  for (const f of baseFiles()) {
+    const v = FACETS[key].of(f);
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  const all = [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  const pop = document.createElement('div');
+  pop.className = 'popover';
+  pop.innerHTML = `<input class="popq" placeholder="Find ${esc(FACETS[key].label.toLowerCase())}"><div class="popl"></div>
+    <div class="popf"><button class="linkbtn quiet" data-none>Clear</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+  document.body.appendChild(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.left = Math.min(r.left, window.innerWidth - 380) + 'px';
+  pop.style.top = r.bottom + 4 + 'px';
+  const list = $('.popl', pop);
+  const draw = () => {
+    const q = $('.popq', pop).value.trim().toLowerCase();
+    const shown = all.filter(([v]) => !q || String(FACETS[key].show(v)).toLowerCase().includes(q)).slice(0, 400);
+    list.innerHTML = shown.length ? shown.map(([v, n], i) => `<label class="popi"><input type="checkbox" class="check" data-i="${i}" ${F[key].has(v) ? 'checked' : ''}><span class="p" title="${esc(FACETS[key].show(v))}">${esc(FACETS[key].show(v))}</span><span class="n">${nf.format(n)}</span></label>`).join('') : '<div class="empty-list">Nothing found.</div>';
+    list.querySelectorAll('input').forEach((c) => (c.onchange = () => {
+      const v = shown[Number(c.dataset.i)][0];
+      c.checked ? F[key].add(v) : F[key].delete(v);
+      onChange();
+    }));
+  };
+  $('.popq', pop).oninput = draw;
+  $('[data-none]', pop).onclick = () => { F[key].clear(); draw(); onChange(); };
+  $('[data-done]', pop).onclick = closePopover;
+  draw();
+  $('.popq', pop).focus();
+  setTimeout(() => document.addEventListener('mousedown', outside), 0);
+  function outside(e) { if (!pop.contains(e.target)) closePopover(); }
+  closePopover.current = () => { pop.remove(); document.removeEventListener('mousedown', outside); };
+}
+function closePopover() { if (closePopover.current) { closePopover.current(); closePopover.current = null; } }
+
+// ---------- Resizable columns ----------
+
+// Each column has a width you can drag at its right edge; widths are remembered per list.
+function columns(table, key, defs) {
+  let widths;
+  try { widths = JSON.parse(localStorage.getItem('sift.cols.' + key)); } catch (e) { widths = null; }
+  if (!Array.isArray(widths) || widths.length !== defs.length) widths = defs.map((d) => d.w);
+  const apply = () => {
+    const tpl = widths.map((w, i) => (i === widths.length - 1 ? `minmax(${w}px, 1fr)` : w + 'px')).join(' ');
+    table.style.setProperty('--cols', tpl);
+  };
+  const save = () => { try { localStorage.setItem('sift.cols.' + key, JSON.stringify(widths)); } catch (e) { /* not kept */ } };
+  apply();
+  table.querySelectorAll('.grip').forEach((g) => {
+    const i = Number(g.dataset.col);
+    g.onclick = (e) => e.stopPropagation();
+    g.ondblclick = (e) => { e.stopPropagation(); widths[i] = defs[i].w; apply(); save(); };
+    g.onpointerdown = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      g.setPointerCapture(e.pointerId);
+      const startX = e.clientX, startW = widths[i];
+      document.body.classList.add('resizing');
+      g.onpointermove = (m) => { widths[i] = Math.max(defs[i].min || 48, startW + m.clientX - startX); apply(); };
+      g.onpointerup = () => { g.onpointermove = null; document.body.classList.remove('resizing'); save(); };
+    };
+  });
+}
+
+function headCells(defs, st) {
+  return defs.map((d, i) => {
+    const sort = d.sort && st.sort ? `sort ${st.sort.key === d.sort ? 'on' : ''} ${st.sort.key === d.sort && st.sort.asc ? 'asc' : ''}` : '';
+    const grip = i < defs.length - 1 && !d.fixed ? `<span class="grip" data-col="${i}" title="Drag to resize, double-click to reset"></span>` : '';
+    return `<div class="th ${d.num ? 'num' : ''} ${sort}" ${d.sort ? `data-sort="${d.sort}"` : ''}>${d.label}${grip}</div>`;
+  }).join('');
+}
+
+function originCell(f) {
+  return `<div class="muted" title="${esc(f.originDetail || (f.origin ? '' : 'Windows kept no download mark for this file'))}">${esc(f.origin || '—')}</div>`;
+}
+
 // ---------- Old downloads ----------
+
+const OLD_COLS = [
+  { label: '<input type="checkbox" class="check" id="allBox" title="Select all shown">', w: 22, fixed: true },
+  { label: 'Name', sort: 'name', w: 260 },
+  { label: 'Why it looks old', sort: 'why', w: 250 },
+  { label: 'Size', sort: 'size', w: 80, num: true },
+  { label: 'Last used', sort: 'touched', w: 110 },
+  { label: 'From', sort: 'origin', w: 130 },
+  { label: 'Folder', sort: 'dir', w: 220 },
+];
+
+function oldBase() {
+  return S.result.old.map((o) => S.files.get(o.file)).filter((f) => f && !f.kept);
+}
 
 function oldRows() {
   const st = S.old;
-  const q = st.query.trim().toLowerCase();
-  const min = SIZE_STEPS[st.minSize];
   let rows = S.result.old.filter((o) => {
     const f = S.files.get(o.file);
     if (!f || f.kept) return false;
-    if (q && !f.path.toLowerCase().includes(q)) return false;
-    if (st.kinds.size && !st.kinds.has(f.kind)) return false;
     if (st.reasons.size && !o.signals.some((s) => st.reasons.has(s.type))) return false;
-    if (f.size < min) return false;
-    return true;
+    return fileMatches(f, st.f, (x) => x.touched);
   });
   const k = st.sort.key;
   const dir = st.sort.asc ? 1 : -1;
@@ -424,34 +597,22 @@ function renderOld(main) {
   const st = S.old;
   const r = S.result;
   const total = r.old.reduce((a, o) => a + (S.files.get(o.file)?.size || 0), 0);
-  const kindCounts = {};
   const reasonCounts = {};
   for (const o of r.old) {
     const f = S.files.get(o.file);
     if (!f || f.kept) continue;
-    kindCounts[f.kind] = (kindCounts[f.kind] || 0) + 1;
     for (const s of o.signals) reasonCounts[s.type] = (reasonCounts[s.type] || 0) + 1;
   }
-  const kindChips = Object.keys(KIND_LABEL).filter((k) => kindCounts[k]).map((k) =>
-    `<button class="chipbtn ${st.kinds.has(k) ? 'on' : ''}" data-kind="${k}">${KIND_LABEL[k]}<span class="n">${nf.format(kindCounts[k])}</span></button>`).join('');
   const reasonChips = Object.keys(REASON).filter((k) => reasonCounts[k]).map((k) =>
     `<button class="chipbtn ${st.reasons.has(k) ? 'on' : ''}" data-reason="${k}">${REASON[k].label}<span class="n">${nf.format(reasonCounts[k])}</span></button>`).join('');
 
-  const sortCol = (key, label, cls = '') =>
-    `<div class="sort ${cls} ${st.sort.key === key ? 'on' : ''} ${st.sort.key === key && st.sort.asc ? 'asc' : ''}" data-sort="${key}">${label}</div>`;
-
-  main.innerHTML = header('Old downloads', `${nf.format(r.old.length)} files that look like leftovers · ${size(total)}`) + `
-    <div class="filters">
-      <label class="search">${SEARCH_ICON}<input id="q" placeholder="Search name or folder" value="${esc(st.query)}"></label>
-      <div class="chips">${reasonChips}</div>
-    </div>
-    <div class="filters" style="padding-top:0"><div class="chips">${kindChips}</div>
-      <div class="slide">Size <input type="range" id="minSize" min="0" max="${SIZE_STEPS.length - 1}" value="${st.minSize}"><output id="minSizeOut">${sizeStepLabel(st.minSize)}</output></div></div>
-    <div class="table">
-      <div class="thead cols-old"><div><input type="checkbox" class="check" id="allBox" title="Select all shown"></div>
-        ${sortCol('name', 'Name')}${sortCol('why', 'Why it looks old')}${sortCol('size', 'Size', 'num')}${sortCol('touched', 'Last used')}${sortCol('origin', 'From')}${sortCol('dir', 'Folder')}</div>
+  main.innerHTML = header('Old downloads', `${nf.format(r.old.length)} files that look like leftovers · ${size(total)}`) +
+    filterBarHtml(st.f, 'Last used', reasonChips) + `
+    <div class="table" id="table">
+      <div class="thead">${headCells(OLD_COLS, st)}</div>
       <div class="scroller" id="list" tabindex="0"></div>
     </div>` + selbarHtml(st, '');
+  columns($('#table', main), 'old', OLD_COLS);
 
   let rows = oldRows();
   const scroller = $('#list', main);
@@ -461,14 +622,14 @@ function renderOld(main) {
     const sel = st.sel.has(f.id);
     const chips = [...o.signals].sort((x, y) => (x.type === 'untouched' || x.type === 'oldArchive') - (y.type === 'untouched' || y.type === 'oldArchive')).map((s) => `<span class="tag ${s.type === 'untouched' || s.type === 'oldArchive' ? '' : 'accent'}">${esc(REASON[s.type].text(s))}</span>`).join('');
     return {
-      cls: `cols-old ${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
+      cls: `${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
       html: `<div><input type="checkbox" class="check" tabindex="-1" ${sel ? 'checked' : ''}></div>
         <div class="name" title="${esc(f.name)}">${esc(f.name)}</div>
         <div title="${esc(o.signals.map((s) => REASON[s.type].tip(s)).join('\n'))}">${chips}</div>
         <div class="num">${size(f.size)}</div>
         <div class="muted" title="${esc(fullDate(f.touched))}">${ago(f.touched)}</div>
-        <div class="muted" title="${esc(f.origin || 'Where it came from is not known')}">${esc(f.origin || '—')}</div>
-        <div class="muted" style="display:flex;gap:6px;align-items:center"><span style="overflow:hidden;text-overflow:ellipsis" title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>`,
+        ${originCell(f)}
+        <div class="muted cellacts"><span title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>`,
     };
   };
   let list = virtualList(scroller, rows.length, rowHtml);
@@ -483,7 +644,8 @@ function renderOld(main) {
   selectionBehaviour(scroller, st, () => rows, () => true, (i) => rows[i]?.file, { redraw: () => list.redraw(), reveal: (i) => list.reveal(i) }, changed, () => confirmRecycle(st, 'old'));
   wireRowActions(scroller, () => render());
   changed();
-  if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No file matches these filters.</p></div>';
+  const empty = () => { if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No file matches these filters.</p></div>'; };
+  empty();
 
   const refilter = () => {
     rows = oldRows();
@@ -493,14 +655,13 @@ function renderOld(main) {
     st.focus = -1;
     st.anchor = -1;
     list = virtualList(scroller, rows.length, rowHtml);
-    if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No file matches these filters.</p></div>';
+    empty();
     changed();
   };
-  $('#q', main).oninput = (e) => { st.query = e.target.value; refilter(); };
-  $('#minSize', main).oninput = (e) => { st.minSize = Number(e.target.value); $('#minSizeOut', main).textContent = sizeStepLabel(st.minSize); refilter(); };
-  main.querySelectorAll('[data-kind]').forEach((b) => (b.onclick = () => { st.kinds.has(b.dataset.kind) ? st.kinds.delete(b.dataset.kind) : st.kinds.add(b.dataset.kind); b.classList.toggle('on'); refilter(); }));
+  wireFilterBar(main, st.f, oldBase, refilter);
   main.querySelectorAll('[data-reason]').forEach((b) => (b.onclick = () => { st.reasons.has(b.dataset.reason) ? st.reasons.delete(b.dataset.reason) : st.reasons.add(b.dataset.reason); b.classList.toggle('on'); refilter(); }));
-  main.querySelectorAll('[data-sort]').forEach((h) => (h.onclick = () => {
+  main.querySelectorAll('[data-sort]').forEach((h) => (h.onclick = (e) => {
+    if (e.target.closest('.grip')) return;
     const k = h.dataset.sort;
     if (st.sort.key === k) st.sort.asc = !st.sort.asc; else st.sort = { key: k, asc: k === 'name' || k === 'dir' || k === 'origin' || k === 'touched' };
     main.querySelectorAll('[data-sort]').forEach((x) => { x.classList.toggle('on', x.dataset.sort === st.sort.key); x.classList.toggle('asc', x.dataset.sort === st.sort.key && st.sort.asc); });
@@ -520,8 +681,19 @@ const KEEP_RULES = {
   newest: { label: 'newest', pick: (g) => maxBy(g.files, (id) => S.files.get(id).modified) },
   oldest: { label: 'oldest', pick: (g) => maxBy(g.files, (id) => -S.files.get(id).modified) },
   largest: { label: 'largest', pick: (g) => maxBy(g.files, (id) => S.files.get(id).size) },
+  smallest: { label: 'smallest', pick: (g) => maxBy(g.files, (id) => -S.files.get(id).size) },
   shortest: { label: 'shortest name', pick: (g) => maxBy(g.files, (id) => -S.files.get(id).name.length) },
+  shortpath: { label: 'shortest path', pick: (g) => maxBy(g.files, (id) => -S.files.get(id).path.length) },
 };
+
+const DUP_COLS = [
+  { label: '', w: 22, fixed: true },
+  { label: 'Name', w: 300 },
+  { label: 'Folder', w: 300 },
+  { label: 'Size', w: 80, num: true },
+  { label: 'Changed', w: 110 },
+  { label: 'From', w: 130 },
+];
 
 function maxBy(ids, f) {
   let best = ids[0], bv = -Infinity;
@@ -529,17 +701,22 @@ function maxBy(ids, f) {
   return best;
 }
 
+function dupBase() {
+  const seen = new Set();
+  const out = [];
+  for (const g of S.result.groups) for (const id of g.files) if (!seen.has(id) && S.files.has(id)) { seen.add(id); out.push(S.files.get(id)); }
+  return out;
+}
+
+// A group shows when at least one of its files passes the filters; then all its files show,
+// so you always see what a file is a duplicate of.
 function groupsShown() {
   const st = S.dupes;
-  const q = st.query.trim().toLowerCase();
-  const min = SIZE_STEPS[st.minSize];
   return S.result.groups.filter((g) => {
     if (st.kinds.size && !st.kinds.has(g.kind)) return false;
     const fs = g.files.map((id) => S.files.get(id)).filter(Boolean);
     if (fs.length < 2) return false;
-    if (q && !fs.some((f) => f.path.toLowerCase().includes(q))) return false;
-    if (min && !fs.some((f) => f.size >= min)) return false;
-    return true;
+    return fs.some((f) => fileMatches(f, st.f, (x) => x.modified));
   });
 }
 
@@ -569,20 +746,19 @@ function renderDupes(main) {
   const totalFree = r.groups.filter((g) => g.kind === 'sameContent').reduce((a, g) => a + freeable(g), 0);
   const chips = Object.keys(GROUP).filter((k) => counts[k]).map((k) =>
     `<button class="chipbtn ${st.kinds.has(k) ? 'on' : ''}" data-gkind="${k}" title="${esc(GROUP[k].tip)}">${GROUP[k].label}<span class="n">${nf.format(counts[k])}</span></button>`).join('');
-  const ruleOpts = Object.entries(KEEP_RULES).map(([k, v]) => `<option value="${k}" ${st.keepRule === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
 
-  main.innerHTML = header('Duplicates', `${nf.format(r.groups.length)} groups · byte-for-byte copies alone take ${size(totalFree)}`,
-    `<div class="tools"><span class="slide">Keep in every group shown: <select id="rule" class="btn small">${ruleOpts}</select></span><button class="btn" id="applyRule">Select the rest</button>
-      <button class="btn" id="acceptExact" title="In every same-content group, select all copies but one">Select all exact copies</button></div>`) + `
-    <div class="filters">
-      <label class="search">${SEARCH_ICON}<input id="q" placeholder="Search name or folder" value="${esc(st.query)}"></label>
-      <div class="chips">${chips}</div>
-      <div class="slide">Size <input type="range" id="minSize" min="0" max="${SIZE_STEPS.length - 1}" value="${st.minSize}"><output id="minSizeOut">${sizeStepLabel(st.minSize)}</output></div>
-    </div>
-    <div class="table">
-      <div class="thead cols-dup"><div></div><div>Name</div><div>Folder</div><div class="num">Size</div><div>Changed</div><div>From</div></div>
+  main.innerHTML = header('Duplicates', `${nf.format(r.groups.length)} groups · byte-for-byte copies alone take ${size(totalFree)}`) +
+    `<div class="globalkeep" title="In every group shown, the chosen file stays and the others get selected"><span class="muted">Keep in every group:</span>
+      ${Object.entries(KEEP_RULES).map(([k, v]) => `<button class="btn small" data-allrule="${k}">${esc(v.label)}</button>`).join('')}
+      <span class="grow"></span>
+      <button class="btn small" id="acceptExact" title="Only in same-content groups: select all copies but one">Select all exact copies</button>
+      <button class="btn small" id="unselAll">Unselect all</button></div>` +
+    filterBarHtml(st.f, 'Changed', chips) + `
+    <div class="table" id="table">
+      <div class="thead">${headCells(DUP_COLS, st)}</div>
       <div class="scroller" id="list" tabindex="0"></div>
     </div>` + selbarHtml(st, '');
+  columns($('#table', main), 'dupes', DUP_COLS);
 
   let groups = [];
   let rows = [];
@@ -602,10 +778,11 @@ function renderDupes(main) {
     if (row.id === undefined) {
       const n = g.files.length;
       const sizes = new Set(g.files.map((id) => S.files.get(id)?.size));
-      const each = g.kind === 'sameContent' ? `${size(S.files.get(g.files[0]).size)} each` : sizes.size === 1 ? `${size([...sizes][0])} each` : 'different sizes';
+      const each = sizes.size === 1 ? `${size([...sizes][0])} each` : 'different sizes';
+      const tip = g.fingerprint ? `Compared byte for byte: identical.\nFingerprint (MD5): ${g.fingerprint}` : GROUP[g.kind].tip;
       return {
         cls: 'group',
-        html: `<div><b>${esc(GROUP[g.kind].label)}</b> · ${esc(g.label)} · ${n} files · ${each}</div>
+        html: `<div title="${esc(tip)}"><b>${esc(GROUP[g.kind].label)}</b> · ${esc(g.label)} · ${n} files · ${each}</div>
           <div class="acts">Keep: ${Object.entries(KEEP_RULES).map(([k, v]) => `<button class="linkbtn" data-rule="${k}" data-g="${i}">${esc(v.label)}</button>`).join('')}</div>`,
       };
     }
@@ -613,13 +790,13 @@ function renderDupes(main) {
     const sel = st.sel.has(f.id);
     const tags = (f.kept ? '<span class="tag">kept</span>' : '') + (row.id === g.suggested && !f.kept ? `<span class="tag accent" title="The one Sift would keep">Sift’s pick</span>` : '');
     return {
-      cls: `member cols-dup ${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
+      cls: `member ${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
       html: `<div><input type="checkbox" class="check" tabindex="-1" ${sel ? 'checked' : ''} ${f.kept ? 'disabled' : ''}></div>
         <div class="name" title="${esc(f.name)}">${esc(f.name)} ${tags}</div>
-        <div class="muted" style="display:flex;gap:6px;align-items:center"><span style="overflow:hidden;text-overflow:ellipsis" title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>
+        <div class="muted cellacts"><span title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>
         <div class="num">${size(f.size)}</div>
         <div class="muted" title="${esc(fullDate(f.modified))}">${ago(f.modified)}</div>
-        <div class="muted">${esc(f.origin || '—')}</div>`,
+        ${originCell(f)}`,
     };
   };
   let list = virtualList(scroller, rows.length, rowHtml);
@@ -644,14 +821,20 @@ function renderDupes(main) {
     for (const id of [...st.sel]) if (!shownIds.has(id)) st.sel.delete(id);
     st.focus = -1;
     st.anchor = -1;
-    list = virtualList(scroller, rows.length, rowHtml); empty(); updateSel(); };
-  $('#q', main).oninput = (e) => { st.query = e.target.value; refilter(); };
-  $('#minSize', main).oninput = (e) => { st.minSize = Number(e.target.value); $('#minSizeOut', main).textContent = sizeStepLabel(st.minSize); refilter(); };
+    list = virtualList(scroller, rows.length, rowHtml);
+    empty();
+    updateSel();
+  };
+  wireFilterBar(main, st.f, dupBase, refilter);
   main.querySelectorAll('[data-gkind]').forEach((b) => (b.onclick = () => { st.kinds.has(b.dataset.gkind) ? st.kinds.delete(b.dataset.gkind) : st.kinds.add(b.dataset.gkind); b.classList.toggle('on'); refilter(); }));
-  $('#rule', main).onchange = (e) => { st.keepRule = e.target.value; };
-  $('#applyRule', main).onclick = () => { applyKeepRule(groups, st.keepRule); list.redraw(); updateSel(); toast(`Selected all but one in ${nf.format(groups.length)} groups.`); };
+  main.querySelectorAll('[data-allrule]').forEach((b) => (b.onclick = () => {
+    applyKeepRule(groups, b.dataset.allrule);
+    list.redraw(); updateSel();
+    toast(`In ${nf.format(groups.length)} groups the ${esc(KEEP_RULES[b.dataset.allrule].label)} file stays; the rest is selected.`);
+  }));
+  $('#unselAll', main).onclick = () => { st.sel.clear(); list.redraw(); updateSel(); };
   $('#acceptExact', main).onclick = () => {
-    const exact = groupsShown().filter((g) => g.kind === 'sameContent');
+    const exact = groups.filter((g) => g.kind === 'sameContent');
     applyKeepRule(exact, 'suggested');
     list.redraw(); updateSel();
     toast(exact.length ? `Selected the extra copies in ${nf.format(exact.length)} same-content groups. One of each stays.` : 'No same-content groups shown.');

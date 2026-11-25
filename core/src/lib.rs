@@ -81,7 +81,7 @@ pub fn run(
     used.extend(groups.iter().flat_map(|g| g.files.iter().copied()));
     used.sort();
     used.dedup();
-    let origins: HashMap<u32, Option<String>> = used
+    let origins: HashMap<u32, Option<(String, String)>> = used
         .par_iter()
         .map(|&id| (id, scan::read_origin(&files[id as usize].path)))
         .collect();
@@ -100,10 +100,14 @@ pub fn run(
                 modified: 0,
                 touched: 0,
                 origin: None,
+                origin_detail: None,
                 kept: false,
             },
         );
-        f.origin = origins.get(&id).cloned().flatten();
+        if let Some(Some((host, detail))) = origins.get(&id).cloned() {
+            f.origin = Some(host);
+            f.origin_detail = Some(detail);
+        }
         shown.push(f);
     }
     result.files = shown;

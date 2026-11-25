@@ -21,7 +21,7 @@ impl Default for DupeSettings {
     fn default() -> Self {
         DupeSettings {
             min_size: 1024,
-            similar: 90,
+            similar: 95,
         }
     }
 }
@@ -84,7 +84,7 @@ fn same_content(
     min_size: u64,
     cache: &mut HashCache,
     h: &Hashing,
-) -> (Vec<Vec<u32>>, u64) {
+) -> (Vec<(Vec<u32>, String)>, u64) {
     let mut by_size: HashMap<u64, Vec<u32>> = HashMap::new();
     for f in files {
         if f.size >= min_size.max(1) {
@@ -176,11 +176,75 @@ fn same_content(
         );
         groups.entry((f.size, hash.clone())).or_default().push(*id);
     }
-    let mut out: Vec<Vec<u32>> = groups.into_values().filter(|g| g.len() > 1).collect();
-    for g in &mut out {
-        g.sort();
-    }
+    // Fingerprints matching is near-certain; comparing the bytes makes it certain. Every file in
+    // a group is compared with the first, and any that differ split off into their own group.
+    let candidates: Vec<((u64, String), Vec<u32>)> =
+        groups.into_iter().filter(|(_, g)| g.len() > 1).collect();
+    let mut out: Vec<(Vec<u32>, String)> = candidates
+        .into_par_iter()
+        .flat_map_iter(|((_, md5), mut ids)| {
+            ids.sort();
+            let mut verified = Vec::new();
+            while ids.len() > 1 {
+                let first = ids[0];
+                let (same, rest): (Vec<u32>, Vec<u32>) = ids.iter().partition(|&&i| {
+                    i == first
+                        || same_bytes(
+                            &files[first as usize].path,
+                            &files[i as usize].path,
+                            h.cancel,
+                        )
+                });
+                if same.len() > 1 {
+                    verified.push((same, md5.clone()));
+                }
+                ids = rest;
+            }
+            verified
+        })
+        .collect();
+    out.sort();
     (out, read.load(Ordering::Relaxed))
+}
+
+/// True when both files hold exactly the same bytes.
+fn same_bytes(a: &str, b: &str, cancel: &AtomicBool) -> bool {
+    let (Ok(mut fa), Ok(mut fb)) = (std::fs::File::open(a), std::fs::File::open(b)) else {
+        return false;
+    };
+    let mut ba = vec![0u8; 256 * 1024];
+    let mut bb = vec![0u8; 256 * 1024];
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        let na = match read_full(&mut fa, &mut ba) {
+            Some(n) => n,
+            None => return false,
+        };
+        let nb = match read_full(&mut fb, &mut bb) {
+            Some(n) => n,
+            None => return false,
+        };
+        if na != nb || ba[..na] != bb[..nb] {
+            return false;
+        }
+        if na == 0 {
+            return true;
+        }
+    }
+}
+
+fn read_full(f: &mut std::fs::File, buf: &mut [u8]) -> Option<usize> {
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]) {
+            Ok(0) => break,
+            Ok(k) => n += k,
+            Err(_) => return None,
+        }
+    }
+    Some(n)
 }
 
 /// Names so common that the same name in two folders means nothing.
@@ -258,7 +322,7 @@ pub fn find(
     // 1. Same content.
     let (exact, hashed) = same_content(files, settings.min_size, cache, h);
     let mut exact_of: HashMap<u32, usize> = HashMap::new();
-    for (gi, g) in exact.iter().enumerate() {
+    for (gi, (g, md5)) in exact.iter().enumerate() {
         for &id in g {
             exact_of.insert(id, gi);
         }
@@ -275,6 +339,7 @@ pub fn find(
             files: g.clone(),
             suggested,
             label: group_label(files, suggested),
+            fingerprint: Some(md5.clone()),
         });
     }
     // A name-based group that is wholly one same-content group says nothing new.
@@ -330,6 +395,7 @@ pub fn find(
             label: group_label(files, suggested),
             files: members,
             suggested,
+            fingerprint: None,
         });
     }
 
@@ -371,6 +437,7 @@ pub fn find(
             files: ids,
             suggested,
             label: prod.to_string(),
+            fingerprint: None,
         });
     }
 
@@ -399,6 +466,7 @@ pub fn find(
             label: group_label(files, suggested),
             files: ids,
             suggested,
+            fingerprint: None,
         });
     }
 
@@ -466,6 +534,7 @@ pub fn find(
                 label: group_label(files, suggested),
                 files: ids,
                 suggested,
+                fingerprint: None,
             });
         }
     }
@@ -505,6 +574,7 @@ mod tests {
                 modified: *modified,
                 touched: *modified,
                 origin: None,
+                origin_detail: None,
                 kept: false,
             });
         }
@@ -671,6 +741,49 @@ mod tests {
             },
         );
         assert!(!g.iter().any(|g| g.kind == GroupKind::SimilarName));
+    }
+
+    #[test]
+    fn same_size_and_extension_is_not_enough() {
+        // Like a program's preset files: same size, same extension, different bytes.
+        let mut a = vec![1u8; 45_000];
+        let mut b = a.clone();
+        b[44_999] = 2;
+        let mut c = vec![1u8; 70_000]; // past the quick-fingerprint length
+        let mut d = c.clone();
+        d[69_999] = 9;
+        a[0] = 5;
+        b[0] = 5;
+        c[0] = 5;
+        d[0] = 5;
+        let f = fixture(&[
+            ("1008543.fpmcp", &a, 1),
+            ("1097040.fpmcp", &b, 1),
+            ("1040667.fpmcp", &c, 1),
+            ("1229421.fpmcp", &d, 1),
+        ]);
+        assert!(run(&f, S).iter().all(|g| g.kind != GroupKind::SameContent));
+    }
+
+    #[test]
+    fn bytes_are_compared_even_when_fingerprints_agree() {
+        let f = fixture(&[("a/x.bin", b"aaaa-1", 5), ("b/y.bin", b"aaaa-2", 5)]);
+        let cancel = AtomicBool::new(false);
+        let h = Hashing {
+            cancel: &cancel,
+            progress: &|_, _| {},
+        };
+        let mut cache = HashCache::new();
+        for file in &f.files {
+            let c = Cached {
+                size: file.size,
+                modified: file.modified,
+                md5: "same".into(),
+            };
+            cache.insert(file.path.clone(), c);
+        }
+        let (g, _) = find(&f.files, &S, &mut cache, &h);
+        assert!(g.iter().all(|g| g.kind != GroupKind::SameContent));
     }
 
     #[test]

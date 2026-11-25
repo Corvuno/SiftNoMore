@@ -19,6 +19,7 @@
   const h = add('Belastingaangifte 2022.pdf', D, 2.1e6, 30, 'document');
   const i = add('Belastingaangifte 2022 - Kopie.pdf', 'C:\\Users\\Kuno\\Documents', 2.1e6, 30, 'document');
   const j = add('ubuntu-24.04-desktop-amd64.iso', D, 6.1e9, 9, 'disk', 'ubuntu.com');
+  files[j].originDetail = 'Page: https://ubuntu.com/download/desktop\nFile: https://releases.ubuntu.com/24.04/ubuntu-24.04-desktop-amd64.iso';
   old.push({ file: a, signals: [{ type: 'untouched', months: 14 }, { type: 'superseded', newer: 'vlc-3.0.20-win64.exe' }, { type: 'installed', program: 'VLC media player' }] });
   old.push({ file: b, signals: [{ type: 'installed', program: 'VLC media player' }] });
   old.push({ file: c, signals: [{ type: 'untouched', months: 20 }, { type: 'installed', program: 'Google Chrome' }] });

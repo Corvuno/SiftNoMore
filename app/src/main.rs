@@ -206,7 +206,7 @@ async fn scan(handle: tauri::AppHandle) -> Res<String> {
                 },
                 dupes: sift_core::dupes::DupeSettings {
                     min_size: setting_u64(&db, "minDupeSize", 1024),
-                    similar: setting_u64(&db, "similarNames", 90) as u32,
+                    similar: setting_u64(&db, "similarNames", 95) as u32,
                 },
                 now: db::now(),
             };
