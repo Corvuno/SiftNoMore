@@ -30,7 +30,20 @@ In the owner's words where possible, newest last. Only the owner's words settle 
 - The app is called Sift (picked from a round of five names). The repository is SiftNoMore.
 - Design only for now: nothing is built until the owner says so.
 
-## Proposed, not settled
+- Later the same day: build. The owner handed four things over ("you figure out", "you do it",
+  "pick one for now"): the menu structure and layout ("a logical way to move around it ... It's
+  a tool. It doesn't have to look fancy ... a lick of paint never hurt anyone"), the stack
+  (Rust with Tauri, SQLite: confirmed), the slider defaults ("I'll just play around with it"),
+  and the first slice: old downloads and duplicates together, "because they go hand in hand",
+  with fuzzy duplicates: installer versions, a "1" behind the name, "(1)", and similar telltales.
 
-- Stack: Rust with Tauri (a Rust scan core, a web UI for the filterable grid), SQLite for what
-  it remembers. The owner was leaning towards it; not confirmed.
+## Layout and menus (no rounds yet; Claude's own proposal, built)
+
+What was built, for the owner to try and overrule:
+- A sidebar: Scan button with the last scan time on top; "Clean up" with Old downloads and
+  Duplicates (Windows cleaning joins here later); "Sift" with Where to look, History, Settings.
+- Each result page: search, filter chips with counts, a size slider, a list with checkboxes,
+  click / Shift-click / Ctrl+A, and a bar at the bottom: selection size, select by path
+  pattern, Keep, Move to Recycle Bin (always a confirmation listing every file).
+- Slider defaults: unused 6 months, archives 3 months, duplicates from 1 KB, similar names 90%.
+- Calm neutral surfaces, one teal accent, follows Windows light/dark, Segoe UI.

@@ -1,0 +1,13 @@
+<!doctype html>
+<!-- For trying the window in a normal browser with made-up files: open dev/preview.html. Not part of the app. -->
+<html lang="en"><head><meta charset="utf-8"><title>Sift (preview)</title><link rel="stylesheet" href="../ui/style.css"></head>
+<body>
+<script src="mock.js"></script>
+<script>
+fetch('../ui/index.html').then(r => r.text()).then(html => {
+  const body = html.split('<body>')[1].split('<script')[0];
+  document.body.insertAdjacentHTML('afterbegin', body);
+  const s = document.createElement('script'); s.src = '../ui/app.js'; document.body.appendChild(s);
+});
+</script>
+</body></html>

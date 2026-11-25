@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["core", "app"]
+# The app needs Windows (or the WebView libraries) to build; the core builds and tests anywhere.
+default-members = ["core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true

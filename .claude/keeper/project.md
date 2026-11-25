@@ -16,10 +16,10 @@
 - `vision.md` and `settled.md` before taking a view on any part.
 - `settled.md` is the record of what the owner decided, for design topics as well; each design
   topic gets its own section there once it starts, with its round count.
-- `build-rules.md` once building starts.
+- `build-rules.md` before touching code: how it is made, where things live, the checks.
 - `CLAUDE.md` holds the hard lines and wins where it is stricter.
 
 ## The backlog
 
 GitHub issues on this repository, with the labels `Refine`, `Next`, `Building now` and
-`Parked`. Empty so far.
+`Parked`.

@@ -5,4 +5,5 @@ at, finds what has piled up (old downloads, installers, archives, double downloa
 and shows it so you can decide what goes. Later it also helps with what slows Windows down at
 startup.
 
-Status: being designed. Nothing is built yet.
+Status: first version of old downloads and duplicates is built. Download it from the
+[newest build](https://github.com/Corvuno/siftnomore/releases/tag/newest).

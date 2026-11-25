@@ -1,0 +1,51 @@
+name: Windows build
+
+# Tests the core, builds Sift for Windows and puts the newest build on the "Newest build"
+# release page, where the owner downloads it. Runs when the app itself changes on main.
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '.claude/**'
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test the core
+        run: cargo test -p sift-core --locked
+      - name: Build the app and its installer
+        working-directory: app
+        run: npx -y @tauri-apps/cli@2 build
+      - name: Gather the files
+        shell: bash
+        run: |
+          mkdir out
+          cp target/release/bundle/nsis/*-setup.exe "out/Sift-setup.exe"
+          cp target/release/sift.exe "out/Sift-portable.exe"
+          ls -la out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sift-windows
+          path: out/
+      - name: Publish as the newest build
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete newest --yes --cleanup-tag || true
+          gh release create newest out/Sift-setup.exe out/Sift-portable.exe \
+            --target "$GITHUB_SHA" --title "Sift: newest build" --prerelease \
+            --notes "Built from $(git log -1 --format=%s) on $(date -u +%Y-%m-%d). Sift-setup.exe installs Sift for you alone (no admin needed). Sift-portable.exe runs without installing. Windows may warn that the app is unknown: choose More info, then Run anyway."
