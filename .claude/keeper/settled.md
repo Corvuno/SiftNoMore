@@ -69,3 +69,15 @@ Installer versions. Same bytes under unrelated names, the same name with other c
 similar names are "not sure": hidden until asked for. Unpacked archives say where their contents
 are ("Unpacked in <folder>"). Program folders are not skipped (Claude's call, the owner said
 "you tell me"); the Folder filter and Skip list cover that.
+
+### Selecting, filtering, bulk (owner, 2026-11-25)
+
+"The interface is clean and non-intrusive, that's good. The selection method, it needs work.
+There need to be way more filters to find whatever is there and to sift through it, to not have
+to click too much and bulk action it." The older tool was ahead in "all the different ways you
+can select, filter, find, group, group select, remove" (functions only; its layout "is horrible").
+Built: keep-rule chain in the owner's order (preferred folders, "remove from here first"
+folders, no copy mark, Sift's pick, newest, ...), applied to every group shown in one click;
+protect by path pattern; invert; only selected / undecided / with a selection; hide a group as
+"not duplicates" (remembered); sort groups; Old downloads grouped by folder, origin, type,
+extension or reason with one checkbox per group; keyboard review (J/K, 1-9, A, U, N).

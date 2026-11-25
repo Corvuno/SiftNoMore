@@ -286,3 +286,15 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 }
 
 .chipsep { width: 1px; align-self: stretch; background: var(--line-strong); margin: 2px 6px; }
+
+.keyhelp { margin: 0 24px 8px; padding: 7px 12px; border-radius: 6px; background: var(--chip); color: var(--muted); font-size: 12.5px; }
+.accentText { color: var(--accent); font-weight: 600; }
+.keynum { display: inline-grid; place-items: center; width: 17px; height: 17px; margin-right: 7px; border-radius: 4px; background: var(--chip); color: var(--muted); font-size: 11px; font-weight: 600; }
+.ghead { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ghead b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.ghead span { white-space: nowrap; }
+.fold { width: 22px; padding: 2px 0; }
+.rules { padding: 6px 20px 0; max-height: 62vh; overflow-y: auto; display: grid; gap: 14px; }
+.rulesec p { margin: 2px 0 8px; font-size: 12.5px; }
+.dialog .df .grow { flex: 1; }
+.btn.small.primary { color: var(--on-accent); }
