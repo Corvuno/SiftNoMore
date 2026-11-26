@@ -81,3 +81,10 @@ folders, no copy mark, Sift's pick, newest, ...), applied to every group shown i
 protect by path pattern; invert; only selected / undecided / with a selection; hide a group as
 "not duplicates" (remembered); sort groups; Old downloads grouped by folder, origin, type,
 extension or reason with one checkbox per group; keyboard review (J/K, 1-9, A, U, N).
+
+### Menu hierarchy (2026-11-26, open, round 0)
+
+Owner's words: "the logic of the menu, is terrible in this application. It makes no sense that
+the scan button is outside the folders and filters menu.. It needs a hierarchy".
+Status: being understood; questions put to the owner about how a run goes for them. A rebuild
+made without asking was set aside (branch claude/project-thread-pmmofg) and is not a proposal.
