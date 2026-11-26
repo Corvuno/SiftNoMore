@@ -132,3 +132,6 @@ Owner's answers on the old tool's options (2026-11-26):
 - Layout round 1 (2026-11-26), outline sketches: A jobs down the side, B jobs as tabs with steps in
   a row, C results with a side panel, D the job as a sentence (rethink). Page:
   https://claude.ai/artifact/XJkdkUv9cetyZcYtmTqz7C
+- Round 1 reaction (2026-11-26): "B looks best. Acting should have the filters and dry run as a top
+  bar. Information is wide. (Name, folder, size, date modified, and so on. (Also take dupes green
+  for _newest/biggest)". B = jobs as tabs, steps in a row. Next: one round of variations on B.
