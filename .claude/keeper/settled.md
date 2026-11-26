@@ -127,3 +127,8 @@ Owner's answers on the old tool's options (2026-11-26):
 - Proposal approved (2026-11-26): "Yes, sounds good". Permanent delete is a deliberate choice, the
   Recycle Bin stays the default, a permanent delete always asks once more. Next: the layout, in
   words first (design round 0).
+- Moments of use confirmed (2026-11-26): "yes". Most time: "Going though the results. Mostlily.
+  Have not tried it." No reference program yet ("Dont know so fast..").
+- Layout round 1 (2026-11-26), outline sketches: A jobs down the side, B jobs as tabs with steps in
+  a row, C results with a side panel, D the job as a sentence (rethink). Page:
+  https://claude.ai/artifact/XJkdkUv9cetyZcYtmTqz7C
