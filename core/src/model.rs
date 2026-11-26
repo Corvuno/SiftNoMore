@@ -137,13 +137,17 @@ impl GroupKind {
     }
 }
 
+/// A fingerprint of some text, as the keys stored about groups are made.
+pub fn key_of_text(text: &str) -> String {
+    use md5::{Digest, Md5};
+    format!("{:x}", Md5::digest(text.as_bytes()))
+}
+
 /// The stable key of a group: its kind and the sorted, lower-cased paths of its files, hashed.
 pub fn group_key(kind: GroupKind, paths: &[&str]) -> String {
-    use md5::{Digest, Md5};
     let mut p: Vec<String> = paths.iter().map(|p| p.to_lowercase()).collect();
     p.sort();
-    let text = format!("{}:{}", kind.name(), p.join("|"));
-    format!("{:x}", Md5::digest(text.as_bytes()))
+    key_of_text(&format!("{}:{}", kind.name(), p.join("|")))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

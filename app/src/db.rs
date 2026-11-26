@@ -1,21 +1,110 @@
 //! What Sift remembers between runs, in one SQLite file in the user's app-data folder: settings,
-//! folders to look in, skip patterns, the keep-list, content fingerprints, the scan history, the
-//! log of what went to the Recycle Bin, and the last results.
+//! the pool of folders, jobs (each with its folders, settings and saved result), own presets,
+//! skip patterns, the keep-list, content fingerprints, the scan history and the log of what went
+//! to the Recycle Bin.
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sift_core::dupes::{Cached, HashCache};
+use sift_core::presets::{JobSettings, PresetValues};
+use std::collections::HashMap;
 use std::path::Path;
 
 pub struct Db {
     conn: Connection,
 }
 
+/// One folder of the pool as a job sees it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Folder {
+#[serde(rename_all = "camelCase", default)]
+pub struct JobFolder {
     pub path: String,
-    pub enabled: bool,
+    /// Ticked: this job looks in it.
+    pub active: bool,
+    /// Include subfolders.
+    pub recursive: bool,
+}
+
+impl Default for JobFolder {
+    fn default() -> Self {
+        JobFolder {
+            path: String::new(),
+            active: false,
+            recursive: true,
+        }
+    }
+}
+
+/// A job: a folder mix and settings. Every pool folder is listed, in the job's own order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Job {
+    pub id: i64,
+    pub name: String,
+    pub folders: Vec<JobFolder>,
+    pub find_old: bool,
+    pub find_dupes: bool,
+    /// The preset the settings were last set from.
+    pub preset: Option<String>,
+    pub settings: JobSettings,
+    /// Which step is open: setup, results or act.
+    pub step: String,
+    /// Which result list is open: old or dupes.
+    pub list: String,
+}
+
+impl Default for Job {
+    fn default() -> Self {
+        Job {
+            id: 0,
+            name: String::new(),
+            folders: Vec::new(),
+            find_old: true,
+            find_dupes: true,
+            preset: None,
+            settings: JobSettings::default(),
+            step: "setup".into(),
+            list: "old".into(),
+        }
+    }
+}
+
+impl Job {
+    /// The active folders, in the job's order.
+    pub fn active_folders(&self) -> Vec<&JobFolder> {
+        self.folders.iter().filter(|f| f.active).collect()
+    }
+}
+
+/// What the window needs to show a job's tab without opening its result.
+#[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct JobCounts {
+    pub old: i64,
+    pub groups: i64,
+    pub finished_at: i64,
+    pub reviewed: i64,
+}
+
+/// A preset the user saved.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPreset {
+    pub id: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub values: PresetValues,
+}
+
+/// What is remembered about a job's result besides the result itself, kept by file path and
+/// group key so it survives a new scan.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct JobState {
+    pub sel_old: Vec<String>,
+    pub sel_dupes: Vec<String>,
+    pub reviewed: Vec<String>,
+    pub ignored: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +148,9 @@ CREATE TABLE IF NOT EXISTS hashes (path TEXT PRIMARY KEY COLLATE NOCASE, size IN
 CREATE TABLE IF NOT EXISTS scans (id INTEGER PRIMARY KEY, started_at INTEGER, finished_at INTEGER, folders TEXT, files_seen INTEGER, bytes_seen INTEGER, old_count INTEGER, group_count INTEGER, cancelled INTEGER);
 CREATE TABLE IF NOT EXISTS removals (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, reason TEXT NOT NULL, restored_at INTEGER);
 CREATE TABLE IF NOT EXISTS last_result (id INTEGER PRIMARY KEY CHECK (id = 1), json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY, position INTEGER NOT NULL, name TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS job_results (job_id INTEGER PRIMARY KEY, result TEXT, state TEXT NOT NULL DEFAULT '{}', old_count INTEGER NOT NULL DEFAULT 0, group_count INTEGER NOT NULL DEFAULT 0, finished_at INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS presets (id INTEGER PRIMARY KEY, name TEXT NOT NULL, json TEXT NOT NULL);
 ";
 
 /// Folders and patterns nobody wants scanned, put in on first start. The user can remove them.
@@ -86,7 +178,309 @@ impl Db {
             }
             db.set_setting("initialised", "1")?;
         }
+        db.migrate_to_jobs()?;
         Ok(db)
+    }
+
+    /// The first time jobs exist: one job, "Downloads", takes over the folders, settings and last
+    /// result that Sift had before jobs.
+    fn migrate_to_jobs(&self) -> rusqlite::Result<()> {
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM jobs", [], |r| r.get(0))?;
+        if n > 0 {
+            return Ok(());
+        }
+        let num = |key: &str, default: u64| {
+            self.setting(key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(default)
+        };
+        let mut st = self
+            .conn
+            .prepare("SELECT path, enabled FROM folders ORDER BY added_at")?;
+        let folders: Vec<JobFolder> = st
+            .query_map([], |r| {
+                Ok(JobFolder {
+                    path: r.get(0)?,
+                    active: r.get::<_, i64>(1)? != 0,
+                    recursive: true,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        drop(st);
+        let result = self.load_result()?;
+        let defaults = JobSettings::default();
+        let job = Job {
+            name: "Downloads".into(),
+            folders,
+            settings: JobSettings {
+                untouched_months: num("untouchedMonths", defaults.untouched_months as u64) as u32,
+                archive_months: num("archiveMonths", defaults.archive_months as u64) as u32,
+                min_size: num("minDupeSize", defaults.min_size),
+                similar: num("similarNames", defaults.similar as u64) as u32,
+                ..defaults
+            },
+            step: if result.is_some() { "results" } else { "setup" }.into(),
+            ..Default::default()
+        };
+        let id = self.create_job(&job)?;
+        if let Some(json) = result {
+            // What was marked "not duplicates" before is kept: the key is made the same way.
+            let ignored: Vec<String> = self
+                .setting("dismissed")?
+                .and_then(|v| serde_json::from_str::<Vec<String>>(&v).ok())
+                .unwrap_or_default()
+                .iter()
+                .map(|k| sift_core::model::key_of_text(k))
+                .collect();
+            let state = JobState {
+                ignored,
+                ..Default::default()
+            };
+            let (old, groups, finished) =
+                serde_json::from_str::<sift_core::model::ScanResult>(&json)
+                    .map(|r| (r.old.len() as i64, main_groups(&r), r.finished_at))
+                    .unwrap_or_default();
+            self.save_job_result(
+                id,
+                &json,
+                &serde_json::to_string(&state).unwrap_or_else(|_| "{}".into()),
+                old,
+                groups,
+                finished,
+            )?;
+        }
+        self.set_setting("activeJob", &id.to_string())?;
+        Ok(())
+    }
+
+    // ----- Jobs -----
+
+    fn parse_job(id: i64, name: String, json: String) -> Job {
+        let mut j: Job = serde_json::from_str(&json).unwrap_or_default();
+        j.id = id;
+        j.name = name;
+        j
+    }
+
+    pub fn jobs(&self) -> rusqlite::Result<Vec<Job>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id, name, json FROM jobs ORDER BY position, id")?;
+        let rows = st.query_map([], |r| Ok(Db::parse_job(r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+
+    pub fn job(&self, id: i64) -> rusqlite::Result<Option<Job>> {
+        self.conn
+            .query_row("SELECT id, name, json FROM jobs WHERE id = ?1", [id], |r| {
+                Ok(Db::parse_job(r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .optional()
+    }
+
+    pub fn create_job(&self, job: &Job) -> rusqlite::Result<i64> {
+        let pos: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(position), 0) + 1 FROM jobs", [], |r| {
+                    r.get(0)
+                })?;
+        let json = serde_json::to_string(job).unwrap_or_else(|_| "{}".into());
+        self.conn.execute(
+            "INSERT INTO jobs (position, name, json) VALUES (?1, ?2, ?3)",
+            params![pos, job.name, json],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn save_job(&self, job: &Job) -> rusqlite::Result<()> {
+        let json = serde_json::to_string(job).unwrap_or_else(|_| "{}".into());
+        self.conn.execute(
+            "UPDATE jobs SET name = ?2, json = ?3 WHERE id = ?1",
+            params![job.id, job.name, json],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_job(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM jobs WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM job_results WHERE job_id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Adds folders to the pool and to every job (ticked only in `job_id`). A folder the pool
+    /// has already is only ticked there.
+    pub fn add_job_folders(&self, job_id: i64, paths: &[String]) -> rusqlite::Result<()> {
+        for path in paths {
+            self.add_folder(path)?;
+            for mut job in self.jobs()? {
+                let have = job
+                    .folders
+                    .iter()
+                    .position(|f| f.path.eq_ignore_ascii_case(path));
+                match have {
+                    Some(i) if job.id == job_id => job.folders[i].active = true,
+                    Some(_) => continue,
+                    None => job.folders.push(JobFolder {
+                        path: path.clone(),
+                        active: job.id == job_id,
+                        recursive: true,
+                    }),
+                }
+                self.save_job(&job)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Takes a folder out of the pool and out of every job.
+    pub fn remove_pool_folder(&self, path: &str) -> rusqlite::Result<()> {
+        self.remove_folder(path)?;
+        for mut job in self.jobs()? {
+            let before = job.folders.len();
+            job.folders.retain(|f| !f.path.eq_ignore_ascii_case(path));
+            if job.folders.len() != before {
+                self.save_job(&job)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn pool(&self) -> rusqlite::Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path FROM folders ORDER BY added_at, rowid")?;
+        let rows = st.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
+    // ----- Job results -----
+
+    pub fn save_job_result(
+        &self,
+        job_id: i64,
+        result: &str,
+        state: &str,
+        old: i64,
+        groups: i64,
+        finished_at: i64,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO job_results (job_id, result, state, old_count, group_count, finished_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(job_id) DO UPDATE SET result = ?2, state = ?3, old_count = ?4, group_count = ?5, finished_at = ?6",
+            params![job_id, result, state, old, groups, finished_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_job_state(&self, job_id: i64, state: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO job_results (job_id, state) VALUES (?1, ?2) ON CONFLICT(job_id) DO UPDATE SET state = ?2",
+            params![job_id, state],
+        )?;
+        Ok(())
+    }
+
+    /// The saved result (as JSON text) and state of a job.
+    pub fn job_result(&self, job_id: i64) -> rusqlite::Result<(Option<String>, JobState)> {
+        let row: Option<(Option<String>, String)> = self
+            .conn
+            .query_row(
+                "SELECT result, state FROM job_results WHERE job_id = ?1",
+                [job_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((res, state)) => (res, serde_json::from_str(&state).unwrap_or_default()),
+            None => (None, JobState::default()),
+        })
+    }
+
+    pub fn job_counts(&self) -> rusqlite::Result<HashMap<i64, JobCounts>> {
+        let mut st = self.conn.prepare(
+            "SELECT job_id, old_count, group_count, finished_at, state FROM job_results WHERE result IS NOT NULL",
+        )?;
+        let rows = st.query_map([], |r| {
+            let state: String = r.get(4)?;
+            let state: JobState = serde_json::from_str(&state).unwrap_or_default();
+            Ok((
+                r.get::<_, i64>(0)?,
+                JobCounts {
+                    old: r.get(1)?,
+                    groups: r.get(2)?,
+                    finished_at: r.get(3)?,
+                    reviewed: state.reviewed.len() as i64,
+                },
+            ))
+        })?;
+        rows.collect()
+    }
+
+    // ----- Own presets -----
+
+    pub fn user_presets(&self) -> rusqlite::Result<Vec<UserPreset>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT id, name, json FROM presets ORDER BY name COLLATE NOCASE")?;
+        let rows = st.query_map([], |r| {
+            let json: String = r.get(2)?;
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, json))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, name, json) = row?;
+            if let Ok(values) = serde_json::from_str::<PresetValues>(&json) {
+                out.push(UserPreset {
+                    id: format!("u{id}"),
+                    name,
+                    values,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn save_preset(&self, name: &str, values: &PresetValues) -> rusqlite::Result<String> {
+        let json = serde_json::to_string(values).unwrap_or_else(|_| "{}".into());
+        self.conn.execute(
+            "INSERT INTO presets (name, json) VALUES (?1, ?2)",
+            params![name, json],
+        )?;
+        Ok(format!("u{}", self.conn.last_insert_rowid()))
+    }
+
+    fn preset_row(id: &str) -> Option<i64> {
+        id.strip_prefix('u').and_then(|n| n.parse().ok())
+    }
+
+    pub fn rename_preset(&self, id: &str, name: &str) -> rusqlite::Result<()> {
+        if let Some(n) = Db::preset_row(id) {
+            self.conn.execute(
+                "UPDATE presets SET name = ?2 WHERE id = ?1",
+                params![n, name],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_preset(&self, id: &str) -> rusqlite::Result<()> {
+        if let Some(n) = Db::preset_row(id) {
+            self.conn
+                .execute("DELETE FROM presets WHERE id = ?1", [n])?;
+            // Jobs that were set from it no longer have a preset to go back to.
+            for mut job in self.jobs()? {
+                if job.preset.as_deref() == Some(id) {
+                    job.preset = None;
+                    self.save_job(&job)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn setting(&self, key: &str) -> rusqlite::Result<Option<String>> {
@@ -111,31 +505,10 @@ impl Db {
         rows.collect()
     }
 
-    pub fn folders(&self) -> rusqlite::Result<Vec<Folder>> {
-        let mut st = self
-            .conn
-            .prepare("SELECT path, enabled FROM folders ORDER BY added_at")?;
-        let rows = st.query_map([], |r| {
-            Ok(Folder {
-                path: r.get(0)?,
-                enabled: r.get::<_, i64>(1)? != 0,
-            })
-        })?;
-        rows.collect()
-    }
-
     pub fn add_folder(&self, path: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO folders (path, enabled, added_at) VALUES (?1, 1, ?2)",
             params![path, now()],
-        )?;
-        Ok(())
-    }
-
-    pub fn set_folder_enabled(&self, path: &str, enabled: bool) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE folders SET enabled = ?2 WHERE path = ?1",
-            params![path, enabled as i64],
         )?;
         Ok(())
     }
@@ -218,14 +591,16 @@ impl Db {
         rows.collect()
     }
 
-    pub fn save_hash_cache(&mut self, cache: &HashCache) -> rusqlite::Result<()> {
+    /// Writes down just the fingerprints a scan worked out, entry by entry, so scans running at
+    /// the same time never overwrite each other's.
+    pub fn upsert_hashes(&mut self, fresh: &[(String, Cached)]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM hashes", [])?;
         {
             let mut st = tx.prepare(
-                "INSERT OR REPLACE INTO hashes (path, size, modified, md5) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO hashes (path, size, modified, md5) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(path) DO UPDATE SET size = ?2, modified = ?3, md5 = ?4",
             )?;
-            for (path, c) in cache {
+            for (path, c) in fresh {
                 st.execute(params![path, c.size as i64, c.modified, c.md5])?;
             }
         }
@@ -306,21 +681,23 @@ impl Db {
         Ok(())
     }
 
-    pub fn save_result(&self, json: &str) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT INTO last_result (id, json) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET json = ?1",
-            [json],
-        )?;
-        Ok(())
-    }
-
-    pub fn load_result(&self) -> rusqlite::Result<Option<String>> {
+    /// The single result Sift kept before jobs existed; only read, to move it into the first job.
+    fn load_result(&self) -> rusqlite::Result<Option<String>> {
         self.conn
             .query_row("SELECT json FROM last_result WHERE id = 1", [], |r| {
                 r.get(0)
             })
             .optional()
     }
+}
+
+/// How many groups count as "duplicates" to review: copies and installer versions.
+pub fn main_groups(r: &sift_core::model::ScanResult) -> i64 {
+    use sift_core::model::GroupKind;
+    r.groups
+        .iter()
+        .filter(|g| matches!(g.kind, GroupKind::Copies | GroupKind::Versions))
+        .count() as i64
 }
 
 pub fn now() -> i64 {
