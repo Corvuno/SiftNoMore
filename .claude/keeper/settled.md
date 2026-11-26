@@ -96,3 +96,9 @@ Owner's answers (2026-11-26), how a run goes:
 2. "If I don't get the results I want, I change them. And I'll probably have multiple jobs running
    at once for different folders (combinations) and or configs"
 3. Windows cleaning: "Seperate".
+
+Owner's answers, round two (2026-11-26):
+1. Jobs: "Presets for sliders and settings would be helpful. And next start the same config helps."
+2. Folder order: "Picking what to keep hirarcy" (the order decides which copy is kept).
+3. What a job looks for: "All of these. So one could look for both. Other one of the two".
+Still open: whether several jobs run at the same time or sit side by side.
