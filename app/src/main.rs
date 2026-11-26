@@ -8,7 +8,7 @@ mod db;
 mod installed;
 
 use db::{Db, Job, JobCounts, JobFolder, JobState, UserPreset};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sift_core::model::ScanResult;
 use sift_core::presets::{Preset, PresetValues};
 use std::collections::{HashMap, HashSet};
@@ -492,10 +492,40 @@ fn cancel_scan(app: State<App>, job_id: i64) {
     }
 }
 
-#[derive(Deserialize)]
-struct ToRecycle {
-    path: String,
-    reason: String,
+// ----- Act -----
+
+/// The plan for what the window has chosen on the Act step, made from the job's saved result.
+fn make_plan(
+    app: &App,
+    job_id: i64,
+    mut req: sift_core::plan::ActRequest,
+) -> Res<sift_core::plan::Plan> {
+    let job = app
+        .db
+        .lock()
+        .unwrap()
+        .job(job_id)
+        .map_err(err)?
+        .ok_or("That job is gone.")?;
+    req.folder_order = order_of(&job);
+    req.roots = req.folder_order.clone();
+    let results = app.results.lock().unwrap();
+    let result = results.get(&job_id).ok_or("Scan or open this job first.")?;
+    Ok(sift_core::plan::build(result, &req, &|p| {
+        std::path::Path::new(p).exists()
+    }))
+}
+
+/// What Go would do, without doing any of it: the dry run.
+#[tauri::command]
+async fn plan_act(
+    handle: tauri::AppHandle,
+    job_id: i64,
+    req: sift_core::plan::ActRequest,
+) -> Res<sift_core::plan::Plan> {
+    tauri::async_runtime::spawn_blocking(move || make_plan(&handle.state::<App>(), job_id, req))
+        .await
+        .map_err(err)?
 }
 
 #[derive(Serialize)]
@@ -505,91 +535,189 @@ struct Failed {
 }
 
 #[derive(Serialize)]
-struct RecycleOutcome {
-    moved: Vec<String>,
+#[serde(rename_all = "camelCase")]
+struct ActOutcome {
+    recycled: usize,
+    moved: usize,
+    renamed: usize,
+    deleted: usize,
     failed: Vec<Failed>,
 }
 
-/// Moves files to the Recycle Bin, one by one, and logs each one. Nothing is ever deleted
-/// outright: if the Recycle Bin can't take a file, it stays where it is and is reported.
+/// Moves a file: a rename, or when that is not possible (another drive) a copy, after which the
+/// original goes to the Recycle Bin. Never overwrites.
+fn move_file(from: &str, to: &str) -> Res<()> {
+    if std::path::Path::new(to).exists() {
+        return Err("A file with that name is already there.".into());
+    }
+    if let Some(dir) = std::path::Path::new(to).parent() {
+        std::fs::create_dir_all(dir).map_err(err)?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to).map_err(err)?;
+    if let Err(e) = trash::delete(from) {
+        // Leave one copy: the one just made goes to the Recycle Bin again.
+        let _ = trash::delete(to);
+        return Err(format!("Could not move it off the original place: {e}"));
+    }
+    Ok(())
+}
+
+fn exists(p: &str) -> bool {
+    std::path::Path::new(p).exists()
+}
+
+/// Does what the plan says, in its order, one file at a time, and writes each step in History.
+/// A file that changed since the scan is left alone. Permanent deletes only run when the window
+/// says the second question was answered.
 #[tauri::command]
-async fn recycle(
+async fn act(
     handle: tauri::AppHandle,
     job_id: i64,
-    items: Vec<ToRecycle>,
-) -> Res<RecycleOutcome> {
-    let h2 = handle.clone();
+    req: sift_core::plan::ActRequest,
+    confirmed_delete: bool,
+) -> Res<ActOutcome> {
+    use sift_core::plan::{OpKind, Removal};
     tauri::async_runtime::spawn_blocking(move || {
-        let app = h2.state::<App>();
-        let mut moved = Vec::new();
-        let mut failed = Vec::new();
-        for it in items {
-            let meta = match std::fs::metadata(&it.path) {
+        let app = handle.state::<App>();
+        if req.removal == Removal::Delete && !confirmed_delete {
+            return Err("Deleting for good has to be confirmed first.".to_string());
+        }
+        let plan = make_plan(&app, job_id, req)?;
+        // What the scan saw of each file, to notice changes.
+        let seen: HashMap<u32, (String, u64, i64)> = app
+            .results
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .map(|r| {
+                r.files
+                    .iter()
+                    .map(|f| (f.id, (f.path.clone(), f.size, f.modified)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut out = ActOutcome {
+            recycled: 0,
+            moved: 0,
+            renamed: 0,
+            deleted: 0,
+            failed: Vec::new(),
+        };
+        let mut touched: HashSet<u32> = HashSet::new();
+        let mut broken: HashSet<u32> = HashSet::new();
+        let mut changed: HashSet<u32> = HashSet::new();
+        for op in &plan.ops {
+            if broken.contains(&op.id) {
+                continue;
+            }
+            let first = touched.insert(op.id);
+            let fail = |out: &mut ActOutcome, broken: &mut HashSet<u32>, error: String| {
+                broken.insert(op.id);
+                out.failed.push(Failed {
+                    path: op.from.clone(),
+                    error,
+                });
+            };
+            let meta = match std::fs::metadata(&op.from) {
                 Ok(m) if m.is_file() => m,
                 Ok(_) => {
-                    failed.push(Failed {
-                        path: it.path,
-                        error: "Not a file.".into(),
-                    });
+                    fail(&mut out, &mut broken, "Not a file.".into());
                     continue;
                 }
                 Err(_) => {
-                    failed.push(Failed {
-                        path: it.path,
-                        error: "It is no longer there.".into(),
-                    });
+                    fail(&mut out, &mut broken, "It is no longer there.".into());
                     continue;
                 }
             };
-            // A file that changed since the scan is left alone: what Sift said about it may no
-            // longer be true.
-            let changed = app.results.lock().unwrap().get(&job_id).and_then(|r| {
-                let want = it.path.to_lowercase();
-                r.files
-                    .iter()
-                    .find(|f| f.path.to_lowercase() == want)
-                    .map(|f| {
-                        let modified = meta
-                            .modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| d.as_secs() as i64)
-                            .unwrap_or(0);
-                        f.size != meta.len() || f.modified != modified
-                    })
-            });
-            if changed == Some(true) {
-                failed.push(Failed {
-                    path: it.path,
-                    error: "It changed since the scan. Scan again first.".into(),
-                });
-                continue;
+            if first {
+                // A file that changed since the scan is left alone: what Sift said about it may
+                // no longer be true.
+                if let Some((_, size, modified)) = seen.get(&op.id) {
+                    let now = meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or(0);
+                    if *size != meta.len() || *modified != now {
+                        fail(
+                            &mut out,
+                            &mut broken,
+                            "It changed since the scan. Scan again first.".into(),
+                        );
+                        continue;
+                    }
+                }
             }
-            match trash::delete(&it.path) {
+            let to = op.to.as_deref();
+            let (done, logged_to): (Res<()>, Option<String>) = match op.kind {
+                OpKind::Recycle => (trash::delete(&op.from).map_err(err), None),
+                OpKind::Delete => (std::fs::remove_file(&op.from).map_err(err), None),
+                OpKind::Move => {
+                    // What is free may have changed since the plan was made.
+                    let planned = to.unwrap_or_default();
+                    let (dir, _) = sift_core::plan::split_path(planned);
+                    let (_, name) = sift_core::plan::split_path(&op.from);
+                    let target = sift_core::plan::free_path(dir, name, &exists);
+                    (move_file(&op.from, &target), Some(target))
+                }
+                OpKind::Rename => {
+                    let target = to.unwrap_or_default().to_string();
+                    let r = if exists(&target) {
+                        Err("A file with that name is already there.".to_string())
+                    } else {
+                        std::fs::rename(&op.from, &target).map_err(err)
+                    };
+                    (r, Some(target))
+                }
+            };
+            match done {
                 Ok(()) => {
-                    let logged =
-                        app.db
-                            .lock()
-                            .unwrap()
-                            .log_removal(&it.path, meta.len(), &it.reason);
+                    changed.insert(op.id);
+                    let kind = match op.kind {
+                        OpKind::Recycle => {
+                            out.recycled += 1;
+                            "recycled"
+                        }
+                        OpKind::Delete => {
+                            out.deleted += 1;
+                            "deleted"
+                        }
+                        OpKind::Move => {
+                            out.moved += 1;
+                            "moved"
+                        }
+                        OpKind::Rename => {
+                            out.renamed += 1;
+                            "renamed"
+                        }
+                    };
+                    let logged = app.db.lock().unwrap().log_action(
+                        kind,
+                        &op.from,
+                        logged_to.as_deref(),
+                        meta.len(),
+                        &op.reason,
+                    );
                     if let Err(e) = logged {
-                        failed.push(Failed {
-                            path: it.path.clone(),
-                            error: format!(
-                                "Moved to the Recycle Bin, but not written in History: {e}"
-                            ),
+                        out.failed.push(Failed {
+                            path: op.from.clone(),
+                            error: format!("Done, but not written in History: {e}"),
                         });
                     }
-                    moved.push(it.path);
                 }
-                Err(e) => failed.push(Failed {
-                    path: it.path,
-                    error: e.to_string(),
-                }),
+                Err(e) => fail(&mut out, &mut broken, e),
             }
         }
-        // Take what went out of every remembered result too.
-        let gone: HashSet<String> = moved.iter().map(|p| p.to_lowercase()).collect();
+        // Take what moved away or changed its name out of every remembered result too: it is no
+        // longer where the scan saw it.
+        let gone: HashSet<String> = changed
+            .iter()
+            .filter_map(|id| seen.get(id).map(|(p, _, _)| p.to_lowercase()))
+            .collect();
         for r in app.results.lock().unwrap().values_mut() {
             let ids: HashSet<u32> = r
                 .files
@@ -600,23 +728,47 @@ async fn recycle(
             r.remove_files(&ids);
         }
         save_cached(&app);
-        Ok(RecycleOutcome { moved, failed })
+        Ok(out)
     })
     .await
     .map_err(err)?
 }
 
-/// Takes a file back out of the Recycle Bin, to where it was.
+/// Undoes one entry of History: puts a file back from the Recycle Bin, moves a moved file back,
+/// or gives a renamed file its old name. A permanent delete cannot be undone.
 #[tauri::command]
-fn put_back(app: State<App>, id: i64) -> Res<()> {
-    let removal = app
+fn undo(app: State<App>, id: i64) -> Res<()> {
+    let entry = app
         .db
         .lock()
         .unwrap()
         .removal(id)
         .map_err(err)?
         .ok_or("Not in the log.")?;
-    restore_from_bin(&removal.path)?;
+    if entry.restored_at.is_some() {
+        return Err("Already undone.".into());
+    }
+    match entry.kind.as_str() {
+        "recycled" => restore_from_bin(&entry.path)?,
+        "moved" | "renamed" => {
+            let now_at = entry
+                .to
+                .as_deref()
+                .ok_or("History does not say where it went.")?;
+            if !exists(now_at) {
+                return Err("It is no longer there.".into());
+            }
+            if exists(&entry.path) {
+                return Err("A file with the old name is already in its place.".into());
+            }
+            if entry.kind == "renamed" {
+                std::fs::rename(now_at, &entry.path).map_err(err)?;
+            } else {
+                move_file(now_at, &entry.path)?;
+            }
+        }
+        _ => return Err("A permanent delete can't be undone.".into()),
+    }
     app.db.lock().unwrap().mark_restored(id).map_err(err)
 }
 
@@ -638,7 +790,7 @@ fn restore_from_bin(path: &str) -> Res<()> {
 
 #[cfg(not(windows))]
 fn restore_from_bin(_path: &str) -> Res<()> {
-    Err("Putting back works on Windows only.".into())
+    Err("Putting back from the Recycle Bin works on Windows only.".into())
 }
 
 #[tauri::command]
@@ -721,8 +873,9 @@ fn main() {
             unkeep,
             scan,
             cancel_scan,
-            recycle,
-            put_back,
+            plan_act,
+            act,
+            undo,
             show_in_folder,
             open_file
         ])

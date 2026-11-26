@@ -126,9 +126,15 @@ pub struct ScanRecord {
 pub struct Removal {
     pub id: i64,
     pub at: i64,
+    /// What was done: "recycled", "moved", "renamed" or "deleted".
+    pub kind: String,
+    /// Where the file was.
     pub path: String,
+    /// Where it went (moved, renamed); nothing for recycled and deleted.
+    pub to: Option<String>,
     pub size: i64,
     pub reason: String,
+    /// When it was undone.
     pub restored_at: Option<i64>,
 }
 
@@ -179,7 +185,25 @@ impl Db {
             db.set_setting("initialised", "1")?;
         }
         db.migrate_to_jobs()?;
+        db.add_history_columns()?;
         Ok(db)
+    }
+
+    /// History used to hold only what went to the Recycle Bin; now it holds moves, renames and
+    /// permanent deletes too, each with its kind and where it went.
+    fn add_history_columns(&self) -> rusqlite::Result<()> {
+        let mut st = self.conn.prepare("PRAGMA table_info(removals)")?;
+        let cols: Vec<String> = st
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<_, _>>()?;
+        drop(st);
+        if !cols.iter().any(|c| c == "kind") {
+            self.conn.execute_batch(
+                "ALTER TABLE removals ADD COLUMN kind TEXT NOT NULL DEFAULT 'recycled';
+                 ALTER TABLE removals ADD COLUMN dest TEXT;",
+            )?;
+        }
+        Ok(())
     }
 
     /// The first time jobs exist: one job, "Downloads", takes over the folders, settings and last
@@ -644,26 +668,36 @@ impl Db {
         rows.collect()
     }
 
-    pub fn log_removal(&self, path: &str, size: u64, reason: &str) -> rusqlite::Result<()> {
+    /// Writes one thing Sift did to a file into History.
+    pub fn log_action(
+        &self,
+        kind: &str,
+        path: &str,
+        to: Option<&str>,
+        size: u64,
+        reason: &str,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO removals (at, path, size, reason) VALUES (?1, ?2, ?3, ?4)",
-            params![now(), path, size as i64, reason],
+            "INSERT INTO removals (at, kind, path, dest, size, reason) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now(), kind, path, to, size as i64, reason],
         )?;
         Ok(())
     }
 
     pub fn removals(&self) -> rusqlite::Result<Vec<Removal>> {
         let mut st = self.conn.prepare(
-            "SELECT id, at, path, size, reason, restored_at FROM removals ORDER BY id DESC LIMIT 5000",
+            "SELECT id, at, kind, path, dest, size, reason, restored_at FROM removals ORDER BY id DESC LIMIT 5000",
         )?;
         let rows = st.query_map([], |r| {
             Ok(Removal {
                 id: r.get(0)?,
                 at: r.get(1)?,
-                path: r.get(2)?,
-                size: r.get(3)?,
-                reason: r.get(4)?,
-                restored_at: r.get(5)?,
+                kind: r.get(2)?,
+                path: r.get(3)?,
+                to: r.get(4)?,
+                size: r.get(5)?,
+                reason: r.get(6)?,
+                restored_at: r.get(7)?,
             })
         })?;
         rows.collect()
@@ -841,5 +875,36 @@ mod tests {
         db.upsert_hashes(&fresh).unwrap();
         assert_eq!(db.hash_cache().unwrap()["c:/a"].md5, "y");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn history_keeps_the_kind_and_where_a_file_went() {
+        let p = tmp("history");
+        let db = Db::open(&p).unwrap();
+        db.log_action("recycled", "C:\\a.pdf", None, 10, "Copy")
+            .unwrap();
+        db.log_action("moved", "C:\\b.pdf", Some("E:\\b.pdf"), 20, "Copy")
+            .unwrap();
+        db.log_action("deleted", "C:\\c.pdf", None, 30, "Copy")
+            .unwrap();
+        let all = db.removals().unwrap();
+        assert_eq!(all[0].kind, "deleted");
+        assert_eq!(all[1].to.as_deref(), Some("E:\\b.pdf"));
+        assert_eq!(all[2].kind, "recycled");
+        // Opening a database from before kinds existed turns its rows into "recycled".
+        drop(db);
+        let old = tmp("history-old");
+        {
+            let c = Connection::open(&old).unwrap();
+            c.execute_batch(
+                "CREATE TABLE removals (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, reason TEXT NOT NULL, restored_at INTEGER);
+                 INSERT INTO removals (at, path, size, reason) VALUES (1, 'C:\\x', 5, 'old');",
+            )
+            .unwrap();
+        }
+        let db = Db::open(&old).unwrap();
+        assert_eq!(db.removals().unwrap()[0].kind, "recycled");
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(&old);
     }
 }
