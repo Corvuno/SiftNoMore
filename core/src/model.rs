@@ -57,7 +57,12 @@ pub struct FileEntry {
     pub origin: Option<String>,
     /// The full addresses behind `origin`: the page it was downloaded from and the file's own
     /// address, as Windows recorded them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "originDetail",
+        alias = "origin_detail",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub origin_detail: Option<String>,
     /// On the keep-list: shown so a group makes sense, never suggested for removal.
     #[serde(default)]

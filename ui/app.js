@@ -312,7 +312,9 @@ async function scanJob(id) {
     if (p.result) {
       applyOpened(id, p);
       toast(`${esc(j.name)}: looked at ${nf.format(p.result.stats.filesSeen)} files (${size(p.result.stats.bytesSeen)}).`);
-      if (S.view === 'job' && S.jobId === id && j.step === 'setup') { j.step = 'results'; saveJob(j); }
+      // Read the job again: folders may have changed while the scan ran, and saving the old copy would undo that.
+      const now = jobById(id);
+      if (now && S.view === 'job' && S.jobId === id && now.step === 'setup') { now.step = 'results'; saveJob(now); }
     } else {
       toast('Scan stopped. The earlier results are still here.');
     }
