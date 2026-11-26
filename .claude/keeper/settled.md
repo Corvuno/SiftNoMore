@@ -88,3 +88,11 @@ Owner's words: "the logic of the menu, is terrible in this application. It makes
 the scan button is outside the folders and filters menu.. It needs a hierarchy".
 Status: being understood; questions put to the owner about how a run goes for them. A rebuild
 made without asking was set aside (branch claude/project-thread-pmmofg) and is not a proposal.
+
+Owner's answers (2026-11-26), how a run goes:
+1. "Select a or multiple folders to scan. (And i wish the once that have been scanned it added to
+   stay so i can reselect them. Also a way to order them. After folders comes the filters. What do
+   I want found, what granularity."
+2. "If I don't get the results I want, I change them. And I'll probably have multiple jobs running
+   at once for different folders (combinations) and or configs"
+3. Windows cleaning: "Seperate".
