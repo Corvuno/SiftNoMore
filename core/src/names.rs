@@ -282,6 +282,42 @@ pub fn parse(name: &str) -> NameParts {
     }
 }
 
+/// The name a file would have without its copy mark: "report (1).pdf" and "report - Copy.pdf"
+/// give "report.pdf", "Setup 1.exe" gives "Setup.exe". None when the name carries no mark, or
+/// nothing is left of it. The case of what stays is kept.
+pub fn clean_name(name: &str) -> Option<String> {
+    let (stem, ext) = split_ext(name);
+    let lower = stem.to_lowercase();
+    let (base, mark) = strip_copy_marks(&lower);
+    if mark == CopyMark::None || base.is_empty() {
+        return None;
+    }
+    // Marks sit at the end (or "Copy of" at the start): take the same stretch of the original.
+    let n = base.chars().count();
+    let total = stem.chars().count();
+    if lower.chars().count() != total {
+        return None;
+    }
+    let kept: String = if lower.starts_with(&base) {
+        stem.chars().take(n).collect()
+    } else if lower.ends_with(&base) {
+        stem.chars().skip(total - n).collect()
+    } else {
+        return None;
+    };
+    let kept = kept.trim().to_string();
+    if kept.is_empty() {
+        return None;
+    }
+    // The extension as written (split_ext lowers it).
+    let written = &name[name.len() - ext.len()..];
+    Some(if ext.is_empty() {
+        kept
+    } else {
+        format!("{kept}.{written}")
+    })
+}
+
 /// Compares versions number by number; [3,0] equals [3,0,0].
 pub fn cmp_version(a: &[u64], b: &[u64]) -> std::cmp::Ordering {
     let n = a.len().max(b.len());
@@ -305,6 +341,25 @@ pub fn version_text(v: &[u64]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::clean_name;
+
+    #[test]
+    fn clean_names_drop_copy_marks_and_keep_case() {
+        assert_eq!(clean_name("report (1).pdf").as_deref(), Some("report.pdf"));
+        assert_eq!(
+            clean_name("Report - Copy.PDF").as_deref(),
+            Some("Report.PDF")
+        );
+        assert_eq!(clean_name("Setup 1.exe").as_deref(), Some("Setup.exe"));
+        assert_eq!(
+            clean_name("Copy of Notes.txt").as_deref(),
+            Some("Notes.txt")
+        );
+        assert_eq!(clean_name("report.pdf"), None);
+        assert_eq!(clean_name("(1).pdf"), None);
+        assert_eq!(clean_name("2024 05.pdf"), None);
+    }
+
     use super::*;
 
     fn base(n: &str) -> (String, CopyMark) {

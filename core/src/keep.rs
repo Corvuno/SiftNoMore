@@ -23,6 +23,32 @@ pub fn folder_rank(path: &str, order: &[String]) -> Option<usize> {
     best.map(|(_, i)| i)
 }
 
+/// Among files that are byte for byte the same, the one the folder order says stays: the one
+/// in the highest folder, when that is one file alone. None when no file sits in a listed
+/// folder or the top folder holds more than one of them.
+pub fn pick_by_folder(files: &[&FileEntry], order: &[String]) -> Option<u32> {
+    let mut best: Option<(usize, u32)> = None;
+    let mut tied = false;
+    for f in files {
+        let Some(rank) = folder_rank(&f.path, order) else {
+            continue;
+        };
+        match best {
+            Some((r, _)) if rank > r => {}
+            Some((r, _)) if rank == r => tied = true,
+            _ => {
+                best = Some((rank, f.id));
+                tied = false;
+            }
+        }
+    }
+    if tied {
+        None
+    } else {
+        best.map(|(_, id)| id)
+    }
+}
+
 /// For every group, the file the folder order says stays, or None when it decides nothing:
 /// the group is not of identical files, or the top folder holds more than one of them, or none
 /// of them sits in a listed folder.
@@ -35,27 +61,12 @@ pub fn folder_picks(result: &ScanResult, order: &[String]) -> Vec<Option<u32>> {
             if !matches!(g.kind, GroupKind::Copies | GroupKind::SameContent) {
                 return None;
             }
-            let mut best: Option<(usize, u32)> = None;
-            let mut tied = false;
-            for &id in &g.files {
-                let Some(f) = by_id.get(&id) else { continue };
-                let Some(rank) = folder_rank(&f.path, order) else {
-                    continue;
-                };
-                match best {
-                    Some((r, _)) if rank > r => {}
-                    Some((r, _)) if rank == r => tied = true,
-                    _ => {
-                        best = Some((rank, id));
-                        tied = false;
-                    }
-                }
-            }
-            if tied {
-                None
-            } else {
-                best.map(|(_, id)| id)
-            }
+            let files: Vec<&FileEntry> = g
+                .files
+                .iter()
+                .filter_map(|id| by_id.get(id).copied())
+                .collect();
+            pick_by_folder(&files, order)
         })
         .collect()
 }

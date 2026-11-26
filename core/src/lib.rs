@@ -6,6 +6,7 @@ pub mod keep;
 pub mod model;
 pub mod names;
 pub mod old;
+pub mod plan;
 pub mod presets;
 pub mod scan;
 
