@@ -102,3 +102,15 @@ Owner's answers, round two (2026-11-26):
 2. Folder order: "Picking what to keep hirarcy" (the order decides which copy is kept).
 3. What a job looks for: "All of these. So one could look for both. Other one of the two".
 Still open: whether several jobs run at the same time or sit side by side.
+
+Owner's answers, round three (2026-11-26), in short (full words in the backlog item "Jobs, presets and a menu in the order of a run"):
+- Sift reopens with the last job. Built-in presets (quick scan, thorough clean, obvious duplicates,
+  deeper duplicates, installer leftovers, more Claude finds useful) plus presets you save yourself.
+- Folder order is an input: a "keep in order of folders" choice, on by default. When files are
+  equal the top folder's copy stays; when not equal it doesn't decide. Filters still work on top.
+- Each job sets what it finds (old downloads, duplicates, or both) with a toggle.
+- Several jobs can run at once (two or three) and be looked at later. Results are always saved,
+  with their state; files removed since are gone from them when you come back.
+- Folders: all folders ever added stay available; you tick the active ones and drag them in
+  order. Each job has its own folder order.
+- Will send screenshots of the old tool's options: take the options and logic, never its look.
