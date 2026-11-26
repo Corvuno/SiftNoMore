@@ -266,6 +266,7 @@ mod tests {
                 ext,
                 size: 10,
                 modified: now - age_months * MONTH,
+                created: 0,
                 touched: now - age_months * MONTH,
                 origin: None,
                 origin_detail: None,
@@ -291,6 +292,8 @@ mod tests {
             suggested: 5,
             label: "vlc".into(),
             fingerprint: None,
+            key: String::new(),
+            folder_pick: None,
         }];
         let inst = Installed::new(&["Steam".into()]);
         let old = find(&files, &dirs, &inst, &groups, &OldSettings::default(), now);
@@ -338,6 +341,7 @@ mod tests {
             kind: Kind::Archive,
             size: 1,
             modified: 0,
+            created: 0,
             touched: 0,
             origin: None,
             origin_detail: None,

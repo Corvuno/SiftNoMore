@@ -15,6 +15,9 @@ pub struct DupeSettings {
     pub min_size: u64,
     /// How alike two names must be to count as "similar", in percent. 0 turns it off.
     pub similar: u32,
+    /// Read file contents to find copies and same-content groups. Off when only names are
+    /// needed (versions of installers, same name).
+    pub read_content: bool,
 }
 
 impl Default for DupeSettings {
@@ -22,6 +25,7 @@ impl Default for DupeSettings {
         DupeSettings {
             min_size: 1024,
             similar: 95,
+            read_content: true,
         }
     }
 }
@@ -75,6 +79,8 @@ pub struct Hashing<'a> {
     pub cancel: &'a AtomicBool,
     /// Called with (bytes read so far, bytes that may need reading).
     pub progress: &'a (dyn Fn(u64, u64) + Sync),
+    /// Fingerprints worked out or changed in this run, so the caller can write just those down.
+    pub fresh: Option<&'a std::sync::Mutex<Vec<(String, Cached)>>>,
 }
 
 /// Byte-for-byte duplicates. Files are first grouped by size, then by a fingerprint of their
@@ -166,14 +172,17 @@ fn same_content(
     let mut groups: HashMap<(u64, String), Vec<u32>> = HashMap::new();
     for (id, hash) in &full {
         let f = &files[*id as usize];
-        cache.insert(
-            f.path.clone(),
-            Cached {
-                size: f.size,
-                modified: f.modified,
-                md5: hash.clone(),
-            },
-        );
+        let entry = Cached {
+            size: f.size,
+            modified: f.modified,
+            md5: hash.clone(),
+        };
+        if cache.get(&f.path) != Some(&entry) {
+            if let Some(fresh) = h.fresh {
+                fresh.lock().unwrap().push((f.path.clone(), entry.clone()));
+            }
+            cache.insert(f.path.clone(), entry);
+        }
         groups.entry((f.size, hash.clone())).or_default().push(*id);
     }
     // Fingerprints matching is near-certain; comparing the bytes makes it certain. Every file in
@@ -339,7 +348,11 @@ pub fn find(
     };
 
     // 1. Copies: same content, same name. 2. Same content under other names.
-    let (exact, hashed) = same_content(files, settings.min_size, cache, h);
+    let (exact, hashed) = if settings.read_content {
+        same_content(files, settings.min_size, cache, h)
+    } else {
+        (Vec::new(), 0)
+    };
     let mut exact_of: HashMap<u32, usize> = HashMap::new();
     for (gi, (g, md5)) in exact.iter().enumerate() {
         for &id in g {
@@ -357,6 +370,8 @@ pub fn find(
                 suggested,
                 label: group_label(files, suggested),
                 fingerprint: Some(md5.clone()),
+                key: String::new(),
+                folder_pick: None,
             });
         }
         if by_name.len() == 1 {
@@ -370,6 +385,8 @@ pub fn find(
                 suggested,
                 label: group_label(files, suggested),
                 fingerprint: Some(md5.clone()),
+                key: String::new(),
+                folder_pick: None,
             });
         }
     }
@@ -421,6 +438,8 @@ pub fn find(
             suggested,
             label: prod.to_string(),
             fingerprint: None,
+            key: String::new(),
+            folder_pick: None,
         });
     }
 
@@ -473,6 +492,8 @@ pub fn find(
             files: members,
             suggested,
             fingerprint: None,
+            key: String::new(),
+            folder_pick: None,
         });
     }
 
@@ -541,6 +562,8 @@ pub fn find(
                 files: ids,
                 suggested,
                 fingerprint: None,
+                key: String::new(),
+                folder_pick: None,
             });
         }
     }
@@ -578,6 +601,7 @@ mod tests {
                 ext,
                 size: content.len() as u64,
                 modified: *modified,
+                created: 0,
                 touched: *modified,
                 origin: None,
                 origin_detail: None,
@@ -592,6 +616,7 @@ mod tests {
         let h = Hashing {
             cancel: &cancel,
             progress: &|_, _| {},
+            fresh: None,
         };
         find(&f.files, &s, &mut HashCache::new(), &h).0
     }
@@ -606,6 +631,7 @@ mod tests {
     const S: DupeSettings = DupeSettings {
         min_size: 1,
         similar: 90,
+        read_content: true,
     };
 
     #[test]
@@ -668,6 +694,7 @@ mod tests {
         let h = Hashing {
             cancel: &cancel,
             progress: &|_, _| {},
+            fresh: None,
         };
         let mut cache = HashCache::new();
         let (g, _) = find(&f.files, &S, &mut cache, &h);
@@ -773,6 +800,7 @@ mod tests {
             DupeSettings {
                 min_size: 1,
                 similar: 0,
+                read_content: true,
             },
         );
         assert!(!g.iter().any(|g| g.kind == GroupKind::SimilarName));
@@ -807,6 +835,7 @@ mod tests {
         let h = Hashing {
             cancel: &cancel,
             progress: &|_, _| {},
+            fresh: None,
         };
         let mut cache = HashCache::new();
         for file in &f.files {
@@ -828,7 +857,8 @@ mod tests {
             &f,
             DupeSettings {
                 min_size: 1024,
-                similar: 0
+                similar: 0,
+                read_content: true,
             }
         )
         .is_empty());

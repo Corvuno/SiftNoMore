@@ -47,6 +47,9 @@ pub struct FileEntry {
     pub size: u64,
     /// Seconds since 1970.
     pub modified: i64,
+    /// When the file was created, seconds since 1970 (0 when Windows does not say).
+    #[serde(default)]
+    pub created: i64,
     /// The latest of created, modified and last opened: when the file was last touched at all.
     pub touched: i64,
     /// The website a download came from, read from the mark Windows puts on downloaded files.
@@ -111,6 +114,36 @@ pub struct Group {
     /// (in Windows: certutil -hashfile <file> MD5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+    /// A key that stays the same while the group has the same files: what is stored about a
+    /// group (reviewed, ignored) is stored against it. See `group_key`.
+    #[serde(default)]
+    pub key: String,
+    /// For copies and same-content groups: the file in the folder highest in the job's order,
+    /// when that is one file alone (see `keep::apply_folder_picks`).
+    #[serde(default, rename = "folderPick")]
+    pub folder_pick: Option<u32>,
+}
+
+impl GroupKind {
+    /// The name the window knows the kind by.
+    pub fn name(self) -> &'static str {
+        match self {
+            GroupKind::Copies => "copies",
+            GroupKind::Versions => "versions",
+            GroupKind::SameContent => "sameContent",
+            GroupKind::SameName => "sameName",
+            GroupKind::SimilarName => "similarName",
+        }
+    }
+}
+
+/// The stable key of a group: its kind and the sorted, lower-cased paths of its files, hashed.
+pub fn group_key(kind: GroupKind, paths: &[&str]) -> String {
+    use md5::{Digest, Md5};
+    let mut p: Vec<String> = paths.iter().map(|p| p.to_lowercase()).collect();
+    p.sort();
+    let text = format!("{}:{}", kind.name(), p.join("|"));
+    format!("{:x}", Md5::digest(text.as_bytes()))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -135,4 +168,40 @@ pub struct ScanResult {
     pub groups: Vec<Group>,
     pub stats: Stats,
     pub cancelled: bool,
+}
+
+impl ScanResult {
+    /// Gives every group its key (results saved by older versions have none).
+    pub fn fill_keys(&mut self) {
+        let by_id: std::collections::HashMap<u32, &str> =
+            self.files.iter().map(|f| (f.id, f.path.as_str())).collect();
+        for g in &mut self.groups {
+            let paths: Vec<&str> = g
+                .files
+                .iter()
+                .filter_map(|i| by_id.get(i).copied())
+                .collect();
+            g.key = group_key(g.kind, &paths);
+        }
+    }
+
+    /// Takes files out of the result: from the lists, from groups (a group with fewer than two
+    /// files goes), and the suggestion moves on when it was one of them.
+    pub fn remove_files(&mut self, ids: &std::collections::HashSet<u32>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.files.retain(|f| !ids.contains(&f.id));
+        self.old.retain(|o| !ids.contains(&o.file));
+        for g in self.groups.iter_mut() {
+            g.files.retain(|i| !ids.contains(i));
+            if ids.contains(&g.suggested) {
+                if let Some(&first) = g.files.first() {
+                    g.suggested = first;
+                }
+            }
+        }
+        self.groups.retain(|g| g.files.len() >= 2);
+        self.fill_keys();
+    }
 }
