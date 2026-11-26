@@ -135,38 +135,42 @@ async function loadResult() {
 
 // ---------- Sidebar ----------
 
+function scanText() {
+  const r = S.result;
+  if (S.scanning) {
+    const p = S.progress;
+    if (!p || p.phase === 'looking') return p ? `Looking… ${nf.format(p.files)} files` : 'Starting…';
+    if (p.phase === 'comparing') return `Comparing contents… ${p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 100}%`;
+    return 'Checking what is old…';
+  }
+  return r ? `Last scan ${ago(r.finishedAt)}` : 'Not scanned yet';
+}
+
+function paintBar(bar) {
+  if (!bar) return;
+  bar.hidden = !S.scanning;
+  const p = S.progress;
+  const comparing = S.scanning && p && p.phase === 'comparing';
+  bar.classList.toggle('busy', S.scanning && !comparing);
+  bar.firstElementChild.style.width = comparing ? (p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 100) + '%' : '';
+}
+
 function renderSide() {
   document.querySelectorAll('.navitem').forEach((b) => b.classList.toggle('on', b.dataset.view === S.view));
   const r = S.result;
   $('#countOld').textContent = r ? nf.format(r.old.length) : '';
   $('#countDupes').textContent = r ? nf.format(r.groups.filter((g) => GROUP[g.kind] && GROUP[g.kind].main).length) : '';
-  const btn = $('#scanBtn');
-  const info = $('#scanInfo');
-  const bar = $('#scanBar');
-  if (S.scanning) {
-    btn.textContent = 'Stop';
-    btn.classList.remove('primary');
-    bar.hidden = false;
-    const p = S.progress;
-    if (!p || p.phase === 'looking') {
-      info.textContent = p ? `Looking… ${nf.format(p.files)} files` : 'Starting…';
-      bar.classList.add('busy');
-    } else if (p.phase === 'comparing') {
-      const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 100;
-      info.textContent = `Comparing contents… ${pct}%`;
-      bar.classList.remove('busy');
-      bar.firstElementChild.style.width = pct + '%';
-    } else {
-      info.textContent = 'Checking what is old…';
-      bar.classList.add('busy');
-    }
-  } else {
-    btn.textContent = r ? 'Scan again' : 'Scan now';
-    btn.classList.add('primary');
-    bar.hidden = true;
-    bar.classList.remove('busy');
-    info.textContent = r ? `Last scan ${ago(r.finishedAt)}` : 'Not scanned yet';
-    info.title = r ? fullDate(r.finishedAt) : '';
+  $('#scanInfo').textContent = scanText();
+  $('#scanInfo').title = r && !S.scanning ? fullDate(r.finishedAt) : '';
+  paintBar($('#scanBar'));
+  // The scan page shows the same progress where the button is.
+  const st = $('#scanState');
+  if (st) {
+    $('#scanStateText').textContent = scanText();
+    paintBar($('#scanPageBar'));
+    const btn = $('#scanGo');
+    btn.textContent = S.scanning ? 'Stop' : r ? 'Scan again' : 'Scan';
+    btn.classList.toggle('primary', !S.scanning);
   }
 }
 
@@ -177,7 +181,7 @@ async function scanOrStop() {
   }
   const enabled = (S.overview.folders || []).filter((f) => f.enabled);
   if (!enabled.length) {
-    go('folders');
+    go('scan');
     toast('Add a folder to look in first.');
     return;
   }
@@ -214,7 +218,7 @@ function render() {
   renderSide();
   const main = $('#main');
   main.innerHTML = '';
-  ({ old: renderOld, dupes: renderDupes, folders: renderFolders, history: renderHistory, settings: renderSettings })[S.view](main);
+  ({ scan: renderScan, old: renderOld, dupes: renderDupes, history: renderHistory, kept: renderKept })[S.view](main);
 }
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>';
@@ -225,11 +229,16 @@ function header(title, sub, extra = '') {
 
 function noResult(main, title) {
   main.innerHTML = header(title, '') + `<div class="page"><div class="empty"><h2>Nothing scanned yet</h2>
-    <p>Sift looks in the folders under Where to look. Your Downloads folder is there already.</p>
-    <button class="btn primary" id="emptyScan">Scan now</button> <button class="btn" id="emptyFolders">Where to look</button></div></div>`;
-  $('#emptyScan').onclick = scanOrStop;
-  $('#emptyFolders').onclick = () => go('folders');
+    <p>Start at step 1: choose where to look and what counts, then scan.</p>
+    <button class="btn primary" id="emptyScan">Go to step 1, Scan</button></div></div>`;
+  $('#emptyScan').onclick = () => go('scan');
 }
+
+// Under each result page's title: which scan the list comes from, and the way back to step 1.
+function fromScan() {
+  return S.result ? ` · from the scan ${ago(S.result.finishedAt)} <button class="linkbtn" data-goscan>change and scan again</button>` : '';
+}
+document.addEventListener('click', (e) => { if (e.target.closest('[data-goscan]')) go('scan'); });
 
 
 // ---------- Virtual list ----------
@@ -690,7 +699,7 @@ function renderOld(main) {
     `<span class="chipsep"></span><button class="chipbtn ${st.onlySel ? 'on' : ''}" id="onlySel" title="Show only what you selected, to look it over before removing">Only selected</button>`;
   const groupOpts = Object.entries(OLD_GROUPS).map(([k, v]) => `<option value="${k}" ${st.groupBy === k ? 'selected' : ''}>${v.label}</option>`).join('');
 
-  main.innerHTML = header('Old downloads', `${nf.format(r.old.length)} files that look like leftovers · ${size(total)}`,
+  main.innerHTML = header('Old downloads', `${nf.format(r.old.length)} files that look like leftovers · ${size(total)}` + fromScan(),
     `<div class="tools"><span class="slide">Group by <select id="groupBy" class="btn small">${groupOpts}</select></span>
       <button class="btn small" id="foldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Fold all</button><button class="btn small" id="unfoldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Unfold all</button></div>`) +
     filterBarHtml(st.f, 'Last used', reasonChips) + `
@@ -982,7 +991,7 @@ function renderDupes(main) {
     (dismissedCount ? `<span class="chipsep"></span><button class="chipbtn ${st.showDismissed ? 'on' : ''}" id="showDismissed" title="Groups you marked as not duplicates">Not duplicates<span class="n">${dismissedCount}</span></button>` : '');
   const sortOpts = [['kind', 'kind'], ['freed', 'space freed'], ['count', 'number of files'], ['name', 'name']].map(([k, l]) => `<option value="${k}" ${st.gsort === k ? 'selected' : ''}>${l}</option>`).join('');
 
-  main.innerHTML = header('Duplicates', `${nf.format(mainCount)} groups of duplicates · the extra copies take ${size(totalFree)}` + (notSureCount ? ` · ${nf.format(notSureCount)} more groups not sure` : ''),
+  main.innerHTML = header('Duplicates', `${nf.format(mainCount)} groups of duplicates · the extra copies take ${size(totalFree)}` + (notSureCount ? ` · ${nf.format(notSureCount)} more groups not sure` : '') + fromScan(),
     `<div class="tools"><span class="slide">Sort groups by <select id="gsort" class="btn small">${sortOpts}</select></span></div>`) +
     `<div class="globalkeep"><span class="muted">In every group shown, keep</span>
       <button class="btn small primary" data-allrule="mine" title="${esc(chain().map((k, i) => i + 1 + '. ' + CHAIN_RULES[k].label).join('\n'))}">by my rules</button>
@@ -1204,28 +1213,52 @@ async function putBack(ids) {
 
 // ---------- Where to look ----------
 
-function renderFolders(main) {
+// ---------- Step 1: Scan (where to look, what counts, then scan) ----------
+
+function sliderRow(it) {
+  const v = setting(it.key);
+  return `<div class="setting"><div class="t">${it.title}</div><div class="d">${it.desc}</div>
+    <div class="ctl"><input type="range" data-key="${it.key}" min="${it.min}" max="${it.max}" value="${it.toUi(v)}"><output>${esc(it.label(v))}</output></div></div>`;
+}
+
+function renderScan(main) {
   const o = S.overview;
-  main.innerHTML = header('Where to look', 'Sift only looks in these folders, and only when you press Scan.') + `<div class="page">
-    <div class="card"><h2>Folders</h2><p class="hint">Untick a folder to leave it out without forgetting it.</p>
+  const r = S.result;
+  const on = o.folders.filter((f) => f.enabled).length;
+  main.innerHTML = header('Scan', 'Choose where Sift looks and what counts, then scan. Sift only looks when you press Scan.') + `<div class="page">
+    <div class="card"><h2><span class="num">a</span>Where to look</h2><p class="hint">Untick a folder to leave it out without forgetting it.</p>
       <div class="list" id="folders">${o.folders.length ? o.folders.map((f, i) => `<div class="li ${f.enabled ? '' : 'off'}">
         <input type="checkbox" class="check" data-fi="${i}" ${f.enabled ? 'checked' : ''} title="Look in this folder">
         <span class="p" title="${esc(f.path)}">${esc(f.path)}</span>
         <button class="linkbtn quiet" data-show="${i}">Show</button><button class="linkbtn quiet" data-remove="${i}">Remove</button></div>`).join('') : '<div class="empty-list">No folders yet.</div>'}</div>
-      <div class="addrow"><button class="btn primary" id="addFolder">Add a folder…</button></div></div>
+      <div class="addrow"><button class="btn" id="addFolder">Add a folder…</button></div>
+      <details class="skip" ${S.skipOpen ? 'open' : ''}><summary>Never look in (${o.skip.length})</summary>
+        <p class="hint">Folders and patterns Sift skips. Use * for anything, like <b>*\\Steam\\*</b> or <b>*.tmp</b>.</p>
+        <div class="list">${o.skip.length ? o.skip.map((p, i) => `<div class="li"><span class="p">${esc(p)}</span><button class="linkbtn quiet" data-unskip="${i}">Remove</button></div>`).join('') : '<div class="empty-list">Nothing skipped.</div>'}</div>
+        <div class="addrow"><input id="skipIn" placeholder="A folder path or a pattern"><button class="btn" id="addSkip">Add</button></div>
+      </details></div>
 
-    <div class="card"><h2>Skip</h2><p class="hint">Folders and patterns Sift never goes into. Use * for anything, like <b>*\\Steam\\*</b> or <b>*.tmp</b>.</p>
-      <div class="list">${o.skip.length ? o.skip.map((p, i) => `<div class="li"><span class="p">${esc(p)}</span><button class="linkbtn quiet" data-unskip="${i}">Remove</button></div>`).join('') : '<div class="empty-list">Nothing skipped.</div>'}</div>
-      <div class="addrow"><input id="skipIn" placeholder="A folder path or a pattern"><button class="btn" id="addSkip">Add</button></div></div>
+    ${SETTINGS.map((sec, i) => `<div class="card"><h2><span class="num">${'bc'[i]}</span>${sec.section}</h2>${sec.items.map(sliderRow).join('')}</div>`).join('')}
 
-    <div class="card"><h2>Protected</h2><p class="hint">Files whose path matches one of these can never be selected for removal. Use * for anything, like <b>*\\Photos\\*</b>.</p>
-      <div class="list">${pref('protect', []).length ? pref('protect', []).map((p, i) => `<div class="li"><span class="p">${esc(p)}</span><button class="linkbtn quiet" data-unprotect="${i}">Remove</button></div>`).join('') : '<div class="empty-list">Nothing protected.</div>'}</div>
-      <div class="addrow"><input id="protIn" placeholder="A path or a pattern"><button class="btn" id="addProt">Add</button></div></div>
-
-    <div class="card"><h2>Kept files</h2><p class="hint">Files you chose to keep. Sift never suggests them for removal.</p>
-      <div class="list">${o.kept.length ? o.kept.slice(0, 500).map((k, i) => `<div class="li"><span class="p" title="${esc(k.path)}">${esc(k.path)}</span><span class="m">${ago(k.at)}</span><button class="linkbtn quiet" data-unkeep="${i}">Stop keeping</button></div>`).join('') : '<div class="empty-list">None yet. Use Keep on a file in the lists.</div>'}</div></div>
+    <div class="card"><h2><span class="num">d</span>Scan</h2>
+      <div class="scanpanel" id="scanState">
+        <button class="btn primary big" id="scanGo" ${on ? '' : 'disabled'}>Scan</button>
+        <div class="state"><div id="scanStateText"></div><div id="scanPageBar" class="bar" hidden><i></i></div></div>
+        <button class="linkbtn quiet" id="resetSliders" title="Put every slider back where Sift started">Reset sliders</button>
+      </div>
+      ${on ? '' : '<p class="hint">Tick or add a folder first.</p>'}
+      ${r && !S.scanning ? `<div class="resultlinks"><button class="btn" data-go="old">See ${nf.format(r.old.length)} old downloads →</button><button class="btn" data-go="dupes">See ${nf.format(r.groups.filter((g) => GROUP[g.kind].main).length)} groups of duplicates →</button></div>` : ''}
+    </div>
   </div>`;
+  renderSide();
   const reload = async () => { await loadOverview(); render(); };
+  $('#scanGo', main).onclick = async () => {
+    const was = S.scanning;
+    await scanOrStop();
+    if (!was && !S.scanning && S.result) go('scan');
+  };
+  main.querySelectorAll('[data-go]').forEach((b) => (b.onclick = () => go(b.dataset.go)));
+  $('details.skip', main).ontoggle = (e) => { S.skipOpen = e.target.open; };
   $('#addFolder', main).onclick = async () => {
     try {
       const p = await invoke('pick_folder');
@@ -1236,11 +1269,6 @@ function renderFolders(main) {
   main.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => invoke('open_file', { path: o.folders[b.dataset.show].path }).catch(fail)));
   main.querySelectorAll('[data-remove]').forEach((b) => (b.onclick = async () => { await invoke('remove_folder', { path: o.folders[b.dataset.remove].path }).catch(fail); reload(); }));
   main.querySelectorAll('[data-unskip]').forEach((b) => (b.onclick = async () => { await invoke('remove_skip', { pattern: o.skip[b.dataset.unskip] }).catch(fail); reload(); }));
-  main.querySelectorAll('[data-unkeep]').forEach((b) => (b.onclick = async () => {
-    await invoke('unkeep', { paths: [o.kept[b.dataset.unkeep].path] }).catch(fail);
-    await loadResult();
-    reload();
-  }));
   const addSkip = async () => {
     const v = $('#skipIn', main).value.trim();
     if (!v) return;
@@ -1248,6 +1276,40 @@ function renderFolders(main) {
     reload();
   };
   $('#addSkip', main).onclick = addSkip;
+  $('#skipIn', main).onkeydown = (e) => { if (e.key === 'Enter') addSkip(); };
+  const all = SETTINGS.flatMap((x) => x.items);
+  main.querySelectorAll('input[data-key]').forEach((inp) => {
+    const it = all.find((x) => x.key === inp.dataset.key);
+    inp.oninput = () => { inp.nextElementSibling.textContent = it.label(it.fromUi(Number(inp.value))); };
+    inp.onchange = async () => {
+      const v = it.fromUi(Number(inp.value));
+      await invoke('set_setting', { key: it.key, value: String(v) }).catch(fail);
+      S.overview.settings[it.key] = String(v);
+    };
+  });
+  $('#resetSliders', main).onclick = async () => {
+    for (const [k, v] of Object.entries(DEFAULTS)) await invoke('set_setting', { key: k, value: String(v) }).catch(fail);
+    reload();
+  };
+}
+
+// ---------- Kept and protected ----------
+
+function renderKept(main) {
+  const o = S.overview;
+  main.innerHTML = header('Kept and protected', 'Files Sift never suggests for removal.') + `<div class="page">
+    <div class="card"><h2>Protected paths</h2><p class="hint">Files whose path matches one of these can never be selected. Use * for anything, like <b>*\\Photos\\*</b>.</p>
+      <div class="list">${pref('protect', []).length ? pref('protect', []).map((p, i) => `<div class="li"><span class="p">${esc(p)}</span><button class="linkbtn quiet" data-unprotect="${i}">Remove</button></div>`).join('') : '<div class="empty-list">Nothing protected.</div>'}</div>
+      <div class="addrow"><input id="protIn" placeholder="A path or a pattern"><button class="btn" id="addProt">Add</button></div></div>
+    <div class="card"><h2>Kept files</h2><p class="hint">Files you chose to keep with Keep in the lists.</p>
+      <div class="list">${o.kept.length ? o.kept.slice(0, 500).map((k, i) => `<div class="li"><span class="p" title="${esc(k.path)}">${esc(k.path)}</span><span class="m">${ago(k.at)}</span><button class="linkbtn quiet" data-unkeep="${i}">Stop keeping</button></div>`).join('') : '<div class="empty-list">None yet.</div>'}</div></div>
+  </div>`;
+  main.querySelectorAll('[data-unkeep]').forEach((b) => (b.onclick = async () => {
+    await invoke('unkeep', { paths: [o.kept[b.dataset.unkeep].path] }).catch(fail);
+    await loadResult();
+    await loadOverview();
+    render();
+  }));
   main.querySelectorAll('[data-unprotect]').forEach((b) => (b.onclick = async () => { const l = pref('protect', []); l.splice(Number(b.dataset.unprotect), 1); await savePref('protect', l); render(); }));
   const addProt = async () => {
     const v = $('#protIn', main).value.trim();
@@ -1259,7 +1321,6 @@ function renderFolders(main) {
   };
   $('#addProt', main).onclick = addProt;
   $('#protIn', main).onkeydown = (e) => { if (e.key === 'Enter') addProt(); };
-  $('#skipIn', main).onkeydown = (e) => { if (e.key === 'Enter') addSkip(); };
 }
 
 // ---------- History ----------
@@ -1282,48 +1343,25 @@ function renderHistory(main) {
   main.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => putBack([Number(b.dataset.back)])));
 }
 
-// ---------- Settings ----------
+// ---------- What counts (sliders, shown in step 1) ----------
 
 const MIN_DUPE_STEPS = [0, 1024, 10240, 102400, 1 << 20, 10 << 20, 100 << 20];
 
 const SETTINGS = [
-  { section: 'Old downloads', items: [
+  { section: 'What counts as an old download', items: [
     { key: 'untouchedMonths', title: 'Unused for at least', desc: 'A file nobody opened or changed for this long counts as old.', min: 1, max: 36, toUi: (v) => v, fromUi: (u) => u, label: (v) => `${v} month${v === 1 ? '' : 's'}` },
     { key: 'archiveMonths', title: 'Archives older than', desc: 'Zip, 7z and rar files older than this count as old, even if opened lately.', min: 1, max: 24, toUi: (v) => v, fromUi: (u) => u, label: (v) => `${v} month${v === 1 ? '' : 's'}` },
   ] },
-  { section: 'Duplicates', items: [
+  { section: 'What counts as a duplicate', items: [
     { key: 'minDupeSize', title: 'Leave out files smaller than', desc: 'Tiny files are rarely worth the time.', min: 0, max: MIN_DUPE_STEPS.length - 1, toUi: (v) => Math.max(0, MIN_DUPE_STEPS.indexOf(v)), fromUi: (u) => MIN_DUPE_STEPS[u], label: (v) => (v ? size(v) : 'Include all') },
     { key: 'similarNames', title: 'Similar names: how alike', desc: 'How close two names must be to show as “similar names”. Lower finds more, and more that are not really the same.', min: 79, max: 99, toUi: (v) => (v ? v : 79), fromUi: (u) => (u === 79 ? 0 : u), label: (v) => (v ? v + '%' : 'Off') },
   ] },
 ];
 
-function renderSettings(main) {
-  main.innerHTML = header('Settings', 'Changes apply from the next scan.') + `<div class="page">` + SETTINGS.map((sec) => `<div class="card"><h2>${sec.section}</h2>
-    ${sec.items.map((it) => { const v = setting(it.key); return `<div class="setting"><div class="t">${it.title}</div><div class="d">${it.desc}</div>
-      <div class="ctl"><input type="range" data-key="${it.key}" min="${it.min}" max="${it.max}" value="${it.toUi(v)}"><output>${esc(it.label(v))}</output></div></div>`; }).join('')}</div>`).join('') +
-    `<div class="card"><h2>Back to the start</h2><p class="hint">Puts every slider back where Sift started.</p><button class="btn" id="reset">Reset sliders</button></div></div>`;
-  const all = SETTINGS.flatMap((s) => s.items);
-  main.querySelectorAll('input[data-key]').forEach((inp) => {
-    const it = all.find((x) => x.key === inp.dataset.key);
-    inp.oninput = () => { inp.nextElementSibling.textContent = it.label(it.fromUi(Number(inp.value))); };
-    inp.onchange = async () => {
-      const v = it.fromUi(Number(inp.value));
-      await invoke('set_setting', { key: it.key, value: String(v) }).catch(fail);
-      S.overview.settings[it.key] = String(v);
-    };
-  });
-  $('#reset', main).onclick = async () => {
-    for (const [k, v] of Object.entries(DEFAULTS)) await invoke('set_setting', { key: k, value: String(v) }).catch(fail);
-    await loadOverview();
-    render();
-  };
-}
-
 // ---------- Start ----------
 
 async function start() {
   document.querySelectorAll('.navitem').forEach((b) => (b.onclick = () => go(b.dataset.view)));
-  $('#scanBtn').onclick = scanOrStop;
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
       const q = $('#q');
@@ -1335,7 +1373,7 @@ async function start() {
     await loadOverview();
     await loadResult();
   } catch (e) { fail(e); }
-  if (!S.result) S.view = 'folders';
+  if (!S.result) S.view = 'scan';
   render();
 }
 
