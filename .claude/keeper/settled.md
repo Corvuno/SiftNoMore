@@ -124,3 +124,6 @@ Owner's answers on the old tool's options (2026-11-26):
 - Reviewed, kept with the saved results: "Yea."
 - "ALso filters on visibilty. So only whats visible throuhg filters gets selected by modifiers. - if
   certain files are not seen, selection modifiers are not aplied."
+- Proposal approved (2026-11-26): "Yes, sounds good". Permanent delete is a deliberate choice, the
+  Recycle Bin stays the default, a permanent delete always asks once more. Next: the layout, in
+  words first (design round 0).
