@@ -8,32 +8,19 @@
 </head>
 <body>
 <div class="app">
-  <nav class="side" aria-label="Sections">
+  <header class="top">
     <div class="brand">
       <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="5" fill="var(--accent)"/><rect x="6" y="7" width="12" height="2" rx="1" fill="var(--on-accent)"/><rect x="8" y="11" width="8" height="2" rx="1" fill="var(--on-accent)"/><rect x="10" y="15" width="4" height="2" rx="1" fill="var(--on-accent)"/></svg>
       <span>Sift</span>
     </div>
-
-    <div class="scanbox">
-      <button id="scanBtn" class="btn primary wide">Scan now</button>
-      <div id="scanInfo" class="scaninfo">Not scanned yet</div>
-      <div id="scanBar" class="bar" hidden><i></i></div>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Jobs"></div>
+    <div class="strip" id="strip" aria-label="More">
+      <button data-view="windows" title="Startup programs and temporary files: comes later">Windows cleaning</button>
+      <button data-view="kept">Kept and protected</button>
+      <button data-view="history">History</button>
     </div>
-
-    <div class="navgroup">
-      <div class="navlabel">Clean up</div>
-      <button class="navitem" data-view="old"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7v5l3 2"/></svg><span class="lbl">Old downloads</span><span class="count" id="countOld"></span></button>
-      <button class="navitem" data-view="dupes"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg><span class="lbl">Duplicates</span><span class="count" id="countDupes"></span></button>
-    </div>
-
-    <div class="navgroup">
-      <div class="navlabel">Sift</div>
-      <button class="navitem" data-view="folders"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span class="lbl">Where to look</span></button>
-      <button class="navitem" data-view="history"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.6"/><path d="M4 4v4h4"/><path d="M12 8v4l2.5 1.5"/></svg><span class="lbl">History</span></button>
-      <button class="navitem" data-view="settings"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span class="lbl">Settings</span></button>
-    </div>
-  </nav>
-
+  </header>
+  <nav class="steps" id="steps" aria-label="Steps of this job" hidden></nav>
   <main id="main" class="main"></main>
 </div>
 

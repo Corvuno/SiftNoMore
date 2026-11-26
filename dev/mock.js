@@ -5,7 +5,7 @@
   const files = [];
   const add = (name, dir, size, ageM, kind, origin, ext) => {
     const id = files.length;
-    files.push({ id, path: dir + '\\' + name, dir, name, ext: ext || name.split('.').pop().toLowerCase(), kind, size, modified: now - ageM * M, touched: now - ageM * M, origin, kept: false });
+    files.push({ id, path: dir + '\\' + name, dir, name, ext: ext || name.split('.').pop().toLowerCase(), kind, size, modified: now - ageM * M, created: now - (ageM + 1) * M, touched: now - ageM * M, origin, kept: false });
     return id;
   };
   const old = [], groups = [];
@@ -51,31 +51,108 @@
     const y = add(`movie-${n}.mkv`, 'E:\\Backup\\Films', 1.4e9, 30, 'video');
     groups.push({ kind: 'copies', files: [x, y], suggested: y, label: `movie-${n}.mkv` });
   }
-  let result = { startedAt: now - 7300, finishedAt: now - 7200, folders: [D], files, old, groups, stats: { filesSeen: 48211, bytesSeen: 312e9, foldersSeen: 3100, unreadable: 0, hashedBytes: 9e9 }, cancelled: false };
+  // ---- Jobs, presets and results ----
+  const gkey = (g) => g.kind + ':' + g.files.map((id) => files[id].path.toLowerCase()).sort().join('|');
+  for (const g of groups) { g.key = gkey(g); g.folderPick = null; }
+  const used = (gs, os) => { const ids = new Set(os.map((o) => o.file)); for (const g of gs) for (const id of g.files) ids.add(id); return files.filter((f) => ids.has(f.id)); };
+  const fullResult = () => ({ startedAt: now - 7300, finishedAt: now - 7200, folders: [D], files: used(groups, old), old, groups, stats: { filesSeen: 48211, bytesSeen: 312e9, foldersSeen: 3100, unreadable: 0, hashedBytes: 9e9 }, cancelled: false });
+  const filmGroups = groups.filter((g) => g.label.startsWith('movie-'));
+  const filmsResult = () => ({ startedAt: now - 100, finishedAt: now - 60, folders: ['D:\\Films'], files: used(filmGroups, []), old: [], groups: filmGroups, stats: { filesSeen: 1800, bytesSeen: 900e9, foldersSeen: 40, unreadable: 0, hashedBytes: 3e9 }, cancelled: false });
+
+  const BUILTIN = [
+    ['quick', 'Quick scan', 'Old files and obvious copies, big files only. Fast: names and sizes first.', true, true, { untouchedMonths: 12, archiveMonths: 6, minSize: 1 << 20, kinds: { sameName: false, similarName: false } }],
+    ['thorough', 'Thorough clean', 'Everything Sift can tell, small files too, and names that are only alike.', true, true, { minSize: 0, similar: 90 }],
+    ['obvious', 'Obvious duplicates', 'Only the same file twice, and older versions of one installer.', false, true, { kinds: { sameContent: false, sameName: false, similarName: false } }],
+    ['deeper', 'Deeper duplicates', 'Also the same content under other names, the same name with other content, and similar names.', false, true, { minSize: 0, similar: 88 }],
+    ['installers', 'Installer leftovers', 'Installers that are installed already, replaced by a newer version, or just old.', true, false, { untouchedMonths: 3, extensions: ['exe', 'msi', 'msix', 'msixbundle', 'appx', 'appxbundle'] }],
+    ['archives', 'Old archives', 'Zip, 7z, rar and the like that are old or already unpacked.', true, false, { untouchedMonths: 12, archiveMonths: 6, extensions: ['zip', '7z', 'rar', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst', 'cab'] }],
+  ].map(([id, name, description, findOld, findDupes, o]) => ({ id, name, description, findOld, findDupes, settings: baseSettings(o) }));
+  function baseSettings(o = {}) {
+    return { untouchedMonths: 6, archiveMonths: 3, minSize: 1024, maxSize: 0, similar: 95, dateBy: 'modified', dateFrom: null, dateTo: null, extensions: [], skipSystem: false, ...o, kinds: { copies: true, versions: true, sameContent: true, sameName: true, similarName: true, ...(o.kinds || {}) } };
+  }
+  const userPresets = [];
+  const pool = [D, 'D:\\Films', 'E:\\Backup'];
+  const jobs = [
+    { id: 1, name: 'Downloads', folders: [{ path: D, active: true, recursive: true }, { path: 'D:\\Films', active: false, recursive: true }, { path: 'E:\\Backup', active: false, recursive: true }], findOld: true, findDupes: true, preset: null, settings: baseSettings(), step: 'results', list: 'old' },
+    { id: 2, name: 'Films', folders: [{ path: D, active: false, recursive: true }, { path: 'D:\\Films', active: true, recursive: true }, { path: 'E:\\Backup', active: true, recursive: false }], findOld: false, findDupes: true, preset: 'obvious', settings: baseSettings({ kinds: { sameContent: false, sameName: false, similarName: false } }), step: 'setup', list: 'dupes' },
+  ];
+  const results = { 1: location.hash === '#empty' ? null : fullResult(), 2: null };
+  const states = { 1: { selOld: [], selDupes: [], reviewed: [], ignored: [] }, 2: { selOld: [], selDupes: [], reviewed: [], ignored: [] } };
+  let nextJob = 3, droppedOnce = location.hash === '#dropped' ? 3 : 0;
   const ov = {
-    folders: [{ path: D, enabled: true }, { path: 'D:\\Films', enabled: true }, { path: 'E:\\Backup', enabled: false }],
     skip: ['*\\$RECYCLE.BIN', '*\\.git', '*\\node_modules', '*\\System Volume Information'],
-    kept: [], settings: {}, removals: [], scans: [{ id: 1, startedAt: now - 7300, finishedAt: now - 7200, folders: D, filesSeen: 48211, bytesSeen: 312e9, oldCount: old.length, groupCount: groups.length, cancelled: false }], canPutBack: true,
+    kept: [], settings: { activeJob: '1' }, removals: [], canPutBack: true,
+    scans: [{ id: 1, startedAt: now - 7300, finishedAt: now - 7200, folders: D, filesSeen: 48211, bytesSeen: 312e9, oldCount: old.length, groupCount: groups.length, cancelled: false }],
   };
-  const empty = location.hash === '#empty';
+  const norm = (p) => p.replace(/\\/g, '/').toLowerCase();
+  const rankOf = (path, order) => { let best = -1, len = -1; order.forEach((f, i) => { const n = norm(f).replace(/\/$/, ''); if (norm(path).startsWith(n + '/') && n.length > len) { len = n.length; best = i; } }); return best < 0 ? null : best; };
+  const picks = (r, job) => {
+    const order = job.folders.filter((f) => f.active).map((f) => f.path);
+    return r.groups.map((g) => {
+      if (g.kind !== 'copies' && g.kind !== 'sameContent') return null;
+      let best = null, tied = false;
+      for (const id of g.files) { const rk = rankOf(files[id].path, order); if (rk === null) continue; if (best === null || rk < best.rk) { best = { rk, id }; tied = false; } else if (rk === best.rk) tied = true; }
+      return tied || !best ? null : best.id;
+    });
+  };
+  const withPicks = (r, job) => { if (r) picks(r, job).forEach((p, i) => { r.groups[i].folderPick = p; }); return r; };
+  const mainGroups = (r) => r.groups.filter((g) => g.kind === 'copies' || g.kind === 'versions').length;
+  const counts = () => { const c = {}; for (const j of jobs) { const r = results[j.id]; if (r) c[j.id] = { old: r.old.length, groups: mainGroups(r), finishedAt: r.finishedAt, reviewed: states[j.id].reviewed.length }; } return c; };
+  const jobOf = (id) => jobs.find((j) => j.id === id);
+  const running = new Map();
   const handlers = {
-    overview: () => JSON.parse(JSON.stringify(ov)),
-    last_result: () => (empty ? null : JSON.stringify(result)),
-    keep: ({ paths }) => { for (const p of paths) { ov.kept.unshift({ path: p, at: now }); const fl = files.find((x) => x.path === p); if (fl) fl.kept = true; } result.old = result.old.filter((o) => !files[o.file].kept); },
+    overview: () => JSON.parse(JSON.stringify({ ...ov, jobs, counts: counts(), presets: BUILTIN, userPresets })),
+    job_create: () => { const q = BUILTIN[0]; let n = 1; while (jobs.some((j) => j.name.toLowerCase() === 'job ' + n)) n++; const j = { id: nextJob++, name: 'Job ' + n, folders: pool.map((path) => ({ path, active: false, recursive: true })), findOld: q.findOld, findDupes: q.findDupes, preset: q.id, settings: JSON.parse(JSON.stringify(q.settings)), step: 'setup', list: 'old' }; jobs.push(j); states[j.id] = { selOld: [], selDupes: [], reviewed: [], ignored: [] }; results[j.id] = null; return JSON.parse(JSON.stringify(j)); },
+    job_duplicate: ({ id }) => { const j = JSON.parse(JSON.stringify(jobOf(id))); j.id = nextJob++; j.name += ' copy'; j.step = 'setup'; jobs.push(j); states[j.id] = { selOld: [], selDupes: [], reviewed: [], ignored: [] }; results[j.id] = null; return j; },
+    job_save: ({ job }) => { if (!job.findOld && !job.findDupes) throw 'A job has to look for at least one thing.'; Object.assign(jobOf(job.id), JSON.parse(JSON.stringify(job))); },
+    job_delete: ({ id }) => { jobs.splice(jobs.findIndex((j) => j.id === id), 1); delete results[id]; },
+    job_open: ({ id }) => { const r = results[id]; const d = id === 1 && r ? droppedOnce : 0; droppedOnce = 0; return JSON.stringify({ result: withPicks(r && JSON.parse(JSON.stringify(r)), jobOf(id)), state: states[id], dropped: d }); },
+    job_state_save: ({ id, state }) => { states[id] = state; },
+    job_picks: ({ id }) => (results[id] ? picks(results[id], jobOf(id)) : []),
+    preset_save: ({ name, values }) => { const id = 'u' + (userPresets.length + 1); userPresets.push({ id, name, ...JSON.parse(JSON.stringify(values)) }); return id; },
+    preset_rename: ({ id, name }) => { userPresets.find((p) => p.id === id).name = name; },
+    preset_delete: ({ id }) => { userPresets.splice(userPresets.findIndex((p) => p.id === id), 1); jobs.forEach((j) => { if (j.preset === id) j.preset = null; }); },
+    keep: ({ paths }) => { for (const p of paths) { ov.kept.unshift({ path: p, at: now }); const fl = files.find((x) => x.path === p); if (fl) fl.kept = true; } for (const r of Object.values(results)) if (r) r.old = r.old.filter((o) => !files[o.file].kept); },
     unkeep: ({ paths }) => { ov.kept = ov.kept.filter((k) => !paths.includes(k.path)); for (const fl of files) if (paths.includes(fl.path)) fl.kept = false; },
     set_setting: ({ key, value }) => { ov.settings[key] = value; },
-    recycle: ({ items }) => {
+    recycle: ({ jobId, items }) => {
       const gone = new Set(items.map((x) => x.path));
-      items.forEach((x, k) => ov.removals.unshift({ id: ov.removals.length + 1, at: now, path: x.path, size: files.find((f) => f.path === x.path).size, reason: x.reason, restoredAt: null }));
+      items.forEach((x) => ov.removals.unshift({ id: ov.removals.length + 1, at: now, path: x.path, size: files.find((f) => f.path === x.path).size, reason: x.reason, restoredAt: null }));
       const ids = new Set(files.filter((f) => gone.has(f.path)).map((f) => f.id));
-      result = { ...result, files: result.files.filter((f) => !ids.has(f.id)), old: result.old.filter((o) => !ids.has(o.file)), groups: result.groups.map((g) => ({ ...g, files: g.files.filter((i) => !ids.has(i)) })).filter((g) => g.files.length > 1) };
+      for (const [k, r] of Object.entries(results)) {
+        if (!r) continue;
+        const groups2 = r.groups.map((g) => ({ ...g, files: g.files.filter((i) => !ids.has(i)) })).filter((g) => g.files.length > 1);
+        groups2.forEach((g) => { g.key = gkey(g); });
+        results[k] = { ...r, files: r.files.filter((f) => !ids.has(f.id)), old: r.old.filter((o) => !ids.has(o.file)), groups: groups2 };
+      }
       return { moved: [...gone], failed: [] };
     },
     put_back: ({ id }) => { const r = ov.removals.find((x) => x.id === id); r.restoredAt = now; },
-    scan: () => new Promise((res) => { let n = 0; const t = setInterval(() => { n += 5000; listeners['scan-progress']?.({ payload: n < 30000 ? { phase: 'looking', files: n } : { phase: 'comparing', done: n - 30000, total: 20000 } }); if (n >= 50000) { clearInterval(t); res(JSON.stringify(result)); } }, 150); }),
-    cancel_scan: () => {}, pick_folder: () => 'C:\\Users\\Kuno\\Desktop', add_folder: ({ path }) => ov.folders.push({ path, enabled: true }),
-    set_folder_enabled: ({ path, enabled }) => { ov.folders.find((f) => f.path === path).enabled = enabled; },
-    remove_folder: ({ path }) => { ov.folders = ov.folders.filter((f) => f.path !== path); },
+    scan: ({ jobId }) => new Promise((res, rej) => {
+      if (running.has(jobId)) return rej('This job is already scanning.');
+      if (running.size >= 3) return rej('Three scans are running; wait or stop one.');
+      const job = jobOf(jobId);
+      if (!job.folders.some((f) => f.active)) return rej('Tick at least one folder to look in first.');
+      running.set(jobId, { stop: false });
+      let n = 0;
+      const t = setInterval(() => {
+        n += 5000;
+        listeners['scan-progress']?.({ payload: n < 30000 ? { jobId, phase: 'looking', files: n } : { jobId, phase: 'comparing', done: n - 30000, total: 20000 } });
+        const stop = running.get(jobId).stop;
+        if (stop || n >= 50000) {
+          clearInterval(t);
+          running.delete(jobId);
+          if (stop) return res(JSON.stringify({ result: null, state: states[jobId], dropped: 0 }));
+          results[jobId] = jobId === 1 ? fullResult() : filmsResult();
+          if (job.findOld === false) results[jobId].old = [];
+          res(JSON.stringify({ result: withPicks(JSON.parse(JSON.stringify(results[jobId])), job), state: states[jobId], dropped: 0 }));
+        }
+      }, 150);
+    }),
+    cancel_scan: ({ jobId }) => { if (running.has(jobId)) running.get(jobId).stop = true; },
+    pick_folder: () => 'C:\\Users\\Kuno\\Desktop',
+    add_folders: ({ jobId, paths }) => { for (const path of paths) { if (!pool.some((p) => p.toLowerCase() === path.toLowerCase())) pool.push(path); for (const j of jobs) { const f = j.folders.find((x) => x.path.toLowerCase() === path.toLowerCase()); if (f) { if (j.id === jobId) f.active = true; } else j.folders.push({ path, active: j.id === jobId, recursive: true }); } } },
+    remove_folder: ({ path }) => { pool.splice(pool.indexOf(path), 1); jobs.forEach((j) => { j.folders = j.folders.filter((f) => f.path !== path); }); },
     add_skip: ({ pattern }) => ov.skip.push(pattern), remove_skip: ({ pattern }) => { ov.skip = ov.skip.filter((p) => p !== pattern); },
     show_in_folder: () => {}, open_file: () => {},
   };
