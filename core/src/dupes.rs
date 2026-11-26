@@ -707,6 +707,25 @@ mod tests {
     }
 
     #[test]
+    fn only_new_fingerprints_are_reported() {
+        let f = fixture(&[("a/x.bin", b"same-same", 5), ("b/y.bin", b"same-same", 5)]);
+        let cancel = AtomicBool::new(false);
+        let fresh = std::sync::Mutex::new(Vec::new());
+        let h = Hashing {
+            cancel: &cancel,
+            progress: &|_, _| {},
+            fresh: Some(&fresh),
+        };
+        let mut cache = HashCache::new();
+        find(&f.files, &S, &mut cache, &h);
+        assert_eq!(fresh.lock().unwrap().len(), 2);
+        // A second run finds both in the cache: nothing new to write down.
+        fresh.lock().unwrap().clear();
+        find(&f.files, &S, &mut cache, &h);
+        assert!(fresh.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn copies_by_name() {
         let f = fixture(&[
             ("tool.exe", b"v1", 1),

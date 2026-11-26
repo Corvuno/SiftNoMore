@@ -706,3 +706,140 @@ pub fn now() -> i64 {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("sift-db-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_file(&d);
+        d
+    }
+
+    /// A database as the version before jobs left it.
+    fn legacy(path: &Path) {
+        let c = Connection::open(path).unwrap();
+        c.execute_batch(SCHEMA).unwrap();
+        c.execute_batch(
+            "INSERT INTO settings VALUES ('initialised', '1'), ('untouchedMonths', '9'), ('minDupeSize', '10240'), ('dismissed', '[\"copies:c:/a.pdf|c:/b.pdf\"]');
+             INSERT INTO folders VALUES ('C:\\Users\\K\\Downloads', 1, 1), ('D:\\Old', 0, 2);",
+        )
+        .unwrap();
+        let result = sift_core::model::ScanResult {
+            finished_at: 5,
+            ..Default::default()
+        };
+        c.execute(
+            "INSERT INTO last_result (id, json) VALUES (1, ?1)",
+            [serde_json::to_string(&result).unwrap()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn existing_setup_becomes_the_downloads_job() {
+        let p = tmp("migrate");
+        legacy(&p);
+        let db = Db::open(&p).unwrap();
+        let jobs = db.jobs().unwrap();
+        assert_eq!(jobs.len(), 1);
+        let j = &jobs[0];
+        assert_eq!(j.name, "Downloads");
+        assert_eq!(j.folders.len(), 2);
+        assert!(j.folders[0].active && !j.folders[1].active);
+        assert_eq!(j.settings.untouched_months, 9);
+        assert_eq!(j.settings.min_size, 10240);
+        assert_eq!(j.step, "results");
+        assert_eq!(db.setting("activeJob").unwrap().unwrap(), j.id.to_string());
+        let (result, state) = db.job_result(j.id).unwrap();
+        assert!(result.is_some());
+        // The old "not duplicates" mark carries over under the new key.
+        assert_eq!(
+            state.ignored,
+            vec![sift_core::model::group_key(
+                sift_core::model::GroupKind::Copies,
+                &["c:/a.pdf", "c:/b.pdf"]
+            )]
+        );
+        // Opening again does not make a second job.
+        drop(db);
+        assert_eq!(Db::open(&p).unwrap().jobs().unwrap().len(), 1);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn folders_are_one_pool_shared_by_jobs() {
+        let p = tmp("pool");
+        let db = Db::open(&p).unwrap();
+        let first = db.jobs().unwrap().remove(0);
+        let second = Job {
+            name: "Second".into(),
+            folders: first
+                .folders
+                .iter()
+                .map(|f| JobFolder {
+                    active: false,
+                    ..f.clone()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let second_id = db.create_job(&second).unwrap();
+        db.add_job_folders(second_id, &["E:\\New".to_string()])
+            .unwrap();
+        let (a, b) = (
+            db.job(first.id).unwrap().unwrap(),
+            db.job(second_id).unwrap().unwrap(),
+        );
+        // Every job lists the new folder; only the job it was added in ticks it.
+        assert!(a.folders.iter().any(|f| f.path == "E:\\New" && !f.active));
+        assert!(b.folders.iter().any(|f| f.path == "E:\\New" && f.active));
+        db.remove_pool_folder("E:\\New").unwrap();
+        assert!(!db
+            .job(second_id)
+            .unwrap()
+            .unwrap()
+            .folders
+            .iter()
+            .any(|f| f.path == "E:\\New"));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn presets_and_results_are_kept_per_job() {
+        let p = tmp("presets");
+        let db = Db::open(&p).unwrap();
+        let id = db.jobs().unwrap()[0].id;
+        let values = PresetValues {
+            find_old: true,
+            find_dupes: false,
+            settings: JobSettings::default(),
+        };
+        let pid = db.save_preset("Mine", &values).unwrap();
+        assert_eq!(db.user_presets().unwrap()[0].id, pid);
+        db.rename_preset(&pid, "Renamed").unwrap();
+        assert_eq!(db.user_presets().unwrap()[0].name, "Renamed");
+        db.save_job_state(id, "{\"selOld\":[\"x\"]}").unwrap();
+        assert_eq!(db.job_result(id).unwrap().1.sel_old, vec!["x".to_string()]);
+        db.save_job_result(id, "{}", "{}", 3, 2, 9).unwrap();
+        assert_eq!(db.job_counts().unwrap()[&id].old, 3);
+        db.delete_preset(&pid).unwrap();
+        assert!(db.user_presets().unwrap().is_empty());
+        let mut fresh = Vec::new();
+        fresh.push((
+            "c:/a".to_string(),
+            Cached {
+                size: 1,
+                modified: 2,
+                md5: "x".into(),
+            },
+        ));
+        let mut db = db;
+        db.upsert_hashes(&fresh).unwrap();
+        fresh[0].1.md5 = "y".into();
+        db.upsert_hashes(&fresh).unwrap();
+        assert_eq!(db.hash_cache().unwrap()["c:/a"].md5, "y");
+        let _ = std::fs::remove_file(&p);
+    }
+}
