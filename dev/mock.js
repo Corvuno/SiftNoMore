@@ -45,6 +45,9 @@
   groups.push({ kind: 'sameName', files: [m1, m2, m3], suggested: m3, label: 'report.docx' });
   const s1 = add('invoice-march.pdf', D, 80e3, 4, 'document');
   const s2 = add('invoice-march.pdf', 'C:\\Users\\Kuno\\Desktop', 81e3, 3, 'document');
+  const q1 = add('report.pdf', D, 310e3, 6, 'document');
+  const q2 = add('report (1).pdf', D, 310e3, 5, 'document');
+  groups.push({ kind: 'copies', files: [q1, q2], suggested: q1, label: 'report.pdf', fingerprint: '5d41402abc4b2a76b9719d911017c592' });
   groups.push({ kind: 'sameName', files: [s1, s2], suggested: s2, label: 'invoice-march.pdf' });
   for (let n = 0; n < 300; n++) {
     const x = add(`movie-${n}.mkv`, 'D:\\Films', 1.4e9, 12, 'video');
@@ -100,6 +103,97 @@
   const counts = () => { const c = {}; for (const j of jobs) { const r = results[j.id]; if (r) c[j.id] = { old: r.old.length, groups: mainGroups(r), finishedAt: r.finishedAt, reviewed: states[j.id].reviewed.length }; } return c; };
   const jobOf = (id) => jobs.find((j) => j.id === id);
   const running = new Map();
+  let histId = 0;
+  const disk = new Set(files.map((f) => f.path.toLowerCase()));
+  // A small copy of what core/src/plan.rs does, so the Act step can be tried in a browser.
+  const baseOf = (p) => p.split('\\').pop();
+  const dirOf = (p) => p.slice(0, p.lastIndexOf('\\'));
+  const cleanOf = (name) => { const m = name.match(/^(.+?)(?:\s*\(\d{1,3}\)|\s*-\s*(?:copy|kopie)(?:\s*\(\d+\))?|\s\d{1,2})(\.[A-Za-z0-9]+)?$/i); return m ? m[1] + (m[2] || '') : null; };
+  const numberedName = (name, n) => name.replace(/(\.[^.]*)?$/, ` (${n})$1`);
+  const joinPath = (a, b) => a.replace(/\\+$/, '') + (b ? '\\' + b : '\\');
+  const buildPlan = (r, req, job) => {
+    const order = job.folders.filter((f) => f.active).map((f) => f.path);
+    const byId = new Map(r.files.map((f) => [f.id, f]));
+    const locked = new Set([...req.locked, ...r.files.filter((f) => f.kept).map((f) => f.id)]);
+    const selD = new Set(req.selectedDupes), selO = new Set(req.selectedOld);
+    const goes = [], goSet = new Set(), stays = [], acted = [];
+    let undecided = 0;
+    for (const sg of req.shownGroups) {
+      const g = r.groups.find((x) => x.key === sg.key);
+      if (!g) continue;
+      const level = g.kind === 'copies' || g.kind === 'versions' ? 'sure' : 'notSure';
+      const strat = level === 'sure' ? req.sure : req.notSure;
+      if (strat === 'leave') continue;
+      const ids = sg.files.filter((id) => g.files.includes(id) && byId.has(id));
+      let remove, keepers;
+      if (strat === 'selected') {
+        remove = ids.filter((id) => selD.has(id) && !locked.has(id));
+        keepers = ids.filter((id) => !remove.includes(id) && !locked.has(id));
+      } else {
+        if (ids.length < 2) continue;
+        let keep = null;
+        const fs = ids.map((id) => byId.get(id));
+        if (!ids.some((id) => locked.has(id))) {
+          if (strat === 'folderOrder') {
+            let best = null, tied = false;
+            if (g.kind === 'copies' || g.kind === 'sameContent') for (const f of fs) { const rk = rankOf(f.path, order); if (rk === null) continue; if (best === null || rk < best.rk) { best = { rk, id: f.id }; tied = false; } else if (rk === best.rk) tied = true; }
+            if (!best || tied) { undecided++; continue; }
+            keep = best.id;
+          } else {
+            const key = (f) => (strat === 'newest' ? f.modified : strat === 'oldest' ? -f.modified : f.size);
+            keep = fs.slice().sort((a, b) => key(b) - key(a) || a.id - b.id)[0].id;
+          }
+        }
+        remove = ids.filter((id) => id !== keep && !locked.has(id));
+        keepers = keep === null ? [] : [keep];
+      }
+      if (!remove.length) continue;
+      acted.push(g);
+      for (const id of remove) if (!goSet.has(id)) { goSet.add(id); goes.push([id, level, g]); }
+      for (const id of keepers) stays.push([id, level, g]);
+    }
+    if (req.old === 'selected') for (const id of req.shownOld) if (selO.has(id) && !locked.has(id) && byId.has(id) && !goSet.has(id)) { goSet.add(id); goes.push([id, 'old', null]); }
+    const seen = new Set();
+    const stay2 = stays.filter(([id]) => !goSet.has(id) && !seen.has(id) && seen.add(id));
+    const wiped = r.groups.filter((g) => g.files.length >= 2 && g.files.every((id) => goSet.has(id))).map((g) => g.label);
+    const taken = new Set(), vacated = new Set();
+    const busy = (p) => taken.has(p.toLowerCase()) || (disk.has(p.toLowerCase()) && !vacated.has(p.toLowerCase()));
+    const free = (dir, name) => { let p = joinPath(dir, name), n = 1; while (busy(p)) { n++; p = joinPath(dir, numberedName(name, n)); } taken.add(p.toLowerCase()); return p; };
+    const plan = { items: [], ops: [], skipped: [], undecided, wiped, totals: { go: 0, goBytes: 0, stay: 0, keptMoved: 0, renamed: 0 } };
+    for (const [id, level, g] of goes) {
+      const f = byId.get(id);
+      let fate = 'recycle', kind = 'recycle', to = null;
+      if (req.removal.type === 'delete') { fate = 'delete'; kind = 'delete'; }
+      if (req.removal.type === 'move') {
+        const roots = order.filter((o) => norm(f.dir) === norm(o) || norm(f.dir).startsWith(norm(o).replace(/\/$/, '') + '/')).sort((a, b) => b.length - a.length);
+        const rel = req.removal.keepStructure && roots.length ? f.dir.slice(roots[0].length).replace(/^\\+/, '') : '';
+        to = free(joinPath(req.removal.to, rel).replace(/\\$/, ''), f.name); fate = 'move'; kind = 'move';
+      }
+      vacated.add(f.path.toLowerCase());
+      plan.ops.push({ id, kind, from: f.path, to, reason: g ? 'Duplicate: ' + g.label : 'Old download' });
+      plan.items.push({ id, path: f.path, level, group: g ? g.label : null, fate, movedTo: to, renamedTo: null });
+      plan.totals.go++; plan.totals.goBytes += f.size;
+    }
+    const renames = [];
+    for (const [id, level, g] of stay2) {
+      const f = byId.get(id);
+      const item = { id, path: f.path, level, group: g.label, fate: 'stays', movedTo: null, renamedTo: null };
+      let here = f.path;
+      if (req.moveKept) { const to = free(req.moveKept, f.name); vacated.add(f.path.toLowerCase()); plan.ops.push({ id, kind: 'move', from: f.path, to, reason: 'Kept file of ' + g.label }); plan.totals.keptMoved++; item.movedTo = to; here = to; }
+      if (req.renameKept) {
+        const clean = cleanOf(baseOf(here));
+        if (clean) {
+          const target = joinPath(dirOf(here), clean).replace(/\\$/, '');
+          if (busy(target)) plan.skipped.push({ id, path: f.path, reason: `“${clean}” is already in that folder` });
+          else { taken.add(target.toLowerCase()); vacated.add(here.toLowerCase()); renames.push({ id, kind: 'rename', from: here, to: target, reason: 'Renamed to its clean name' }); plan.totals.renamed++; item.renamedTo = target; }
+        }
+      }
+      plan.totals.stay++;
+      plan.items.push(item);
+    }
+    plan.ops.push(...renames);
+    return plan;
+  };
   const handlers = {
     overview: () => JSON.parse(JSON.stringify({ ...ov, jobs, counts: counts(), presets: BUILTIN, userPresets })),
     job_create: () => { const q = BUILTIN[0]; let n = 1; while (jobs.some((j) => j.name.toLowerCase() === 'job ' + n)) n++; const j = { id: nextJob++, name: 'Job ' + n, folders: pool.map((path) => ({ path, active: false, recursive: true })), findOld: q.findOld, findDupes: q.findDupes, preset: q.id, settings: JSON.parse(JSON.stringify(q.settings)), step: 'setup', list: 'old' }; jobs.push(j); states[j.id] = { selOld: [], selDupes: [], reviewed: [], ignored: [] }; results[j.id] = null; return JSON.parse(JSON.stringify(j)); },
@@ -115,19 +209,35 @@
     keep: ({ paths }) => { for (const p of paths) { ov.kept.unshift({ path: p, at: now }); const fl = files.find((x) => x.path === p); if (fl) fl.kept = true; } for (const r of Object.values(results)) if (r) r.old = r.old.filter((o) => !files[o.file].kept); },
     unkeep: ({ paths }) => { ov.kept = ov.kept.filter((k) => !paths.includes(k.path)); for (const fl of files) if (paths.includes(fl.path)) fl.kept = false; },
     set_setting: ({ key, value }) => { ov.settings[key] = value; },
-    recycle: ({ jobId, items }) => {
-      const gone = new Set(items.map((x) => x.path));
-      items.forEach((x) => ov.removals.unshift({ id: ov.removals.length + 1, at: now, path: x.path, size: files.find((f) => f.path === x.path).size, reason: x.reason, restoredAt: null }));
-      const ids = new Set(files.filter((f) => gone.has(f.path)).map((f) => f.id));
+    plan_act: ({ jobId, req }) => buildPlan(results[jobId], req, jobOf(jobId)),
+    act: ({ jobId, req, confirmedDelete }) => {
+      if (req.removal.type === 'delete' && !confirmedDelete) throw 'Deleting for good has to be confirmed first.';
+      const plan = buildPlan(results[jobId], req, jobOf(jobId));
+      const out = { recycled: 0, moved: 0, renamed: 0, deleted: 0, failed: [] };
+      const word = { recycle: 'recycled', move: 'moved', rename: 'renamed', delete: 'deleted' };
+      const changed = new Set();
+      for (const op of plan.ops) {
+        const f = files[op.id];
+        if (op.kind === 'move') { let to = op.to, n = 1; while (disk.has(to.toLowerCase())) { n++; to = joinPath(dirOf(op.to), numberedName(baseOf(op.from), n)); } op.to = to; disk.add(to.toLowerCase()); }
+        if (op.kind === 'rename') disk.add(op.to.toLowerCase());
+        disk.delete(op.from.toLowerCase());
+        ov.removals.unshift({ id: ++histId, at: now, kind: word[op.kind], path: op.from, to: op.to || null, size: f.size, reason: op.reason, restoredAt: null });
+        out[word[op.kind]]++;
+        changed.add(op.id);
+      }
       for (const [k, r] of Object.entries(results)) {
         if (!r) continue;
-        const groups2 = r.groups.map((g) => ({ ...g, files: g.files.filter((i) => !ids.has(i)) })).filter((g) => g.files.length > 1);
+        const groups2 = r.groups.map((g) => ({ ...g, files: g.files.filter((i) => !changed.has(i)) })).filter((g) => g.files.length > 1);
         groups2.forEach((g) => { g.key = gkey(g); });
-        results[k] = { ...r, files: r.files.filter((f) => !ids.has(f.id)), old: r.old.filter((o) => !ids.has(o.file)), groups: groups2 };
+        results[k] = { ...r, files: r.files.filter((f) => !changed.has(f.id)), old: r.old.filter((o) => !changed.has(o.file)), groups: groups2 };
       }
-      return { moved: [...gone], failed: [] };
+      return out;
     },
-    put_back: ({ id }) => { const r = ov.removals.find((x) => x.id === id); r.restoredAt = now; },
+    undo: ({ id }) => {
+      const x = ov.removals.find((r) => r.id === id);
+      if (x.kind === 'deleted') throw "A permanent delete can't be undone.";
+      x.restoredAt = now;
+    },
     scan: ({ jobId }) => new Promise((res, rej) => {
       if (running.has(jobId)) return rej('This job is already scanning.');
       if (running.size >= 3) return rej('Three scans are running; wait or stop one.');

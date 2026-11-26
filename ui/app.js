@@ -21,17 +21,22 @@ const S = {
   files: new Map(),
   old: null,
   dupes: null,
+  f: null, // the job's filters
+  act: null,
   ignored: new Set(), // keys of groups hidden as "not duplicates"
   reviewed: new Set(), // keys of groups looked at
 };
 
 const RT = new Map(); // job id -> runtime
 
-const newOldState = () => ({ f: newFilter(), reasons: new Set(), sort: { key: 'size', asc: false }, groupBy: 'none', folded: new Set(), onlySel: false, sel: new Set(), focus: -1, anchor: -1 });
-const newDupesState = () => ({ f: newFilter(), kinds: new Set(), notSure: false, show: 'all', gsort: 'kind', showDismissed: false, keys: false, sel: new Set(), focus: -1, anchor: -1 });
+// The filters of a job are one set, shared by both lists and by Act.
+const newOldState = (f) => ({ f, sort: { key: 'size', asc: false }, groupBy: 'none', folded: new Set(), onlySel: false, sel: new Set(), focus: -1, anchor: -1, shownCount: 0 });
+const newDupesState = (f) => ({ f, kinds: new Set(), notSure: false, show: 'all', gsort: 'kind', showDismissed: false, hideSingles: false, keys: false, sel: new Set(), focus: -1, anchor: -1, vis: new Map(), onTouch: null });
+// What was chosen on the Act step; permanent delete is never remembered.
+const newActState = () => ({ sure: 'selected', notSure: 'leave', old: 'leave', removal: 'recycle', moveTo: '', keepStructure: true, moveKept: false, moveKeptTo: '', renameKept: false, dry: false, plan: null });
 
 function rtOf(id) {
-  if (!RT.has(id)) RT.set(id, { result: null, files: new Map(), old: newOldState(), dupes: newDupesState(), ignored: new Set(), reviewed: new Set(), loaded: false, scanning: false, progress: null, dropped: 0, saved: '' });
+  if (!RT.has(id)) { const f = newFilter(); RT.set(id, { result: null, files: new Map(), f, old: newOldState(f), dupes: newDupesState(f), act: newActState(), ignored: new Set(), reviewed: new Set(), loaded: false, scanning: false, progress: null, dropped: 0, saved: '' }); }
   return RT.get(id);
 }
 const jobById = (id) => S.jobs.find((j) => j.id === id);
@@ -139,6 +144,8 @@ function activate(id) {
   S.files = r.files;
   S.old = r.old;
   S.dupes = r.dupes;
+  S.f = r.f;
+  S.act = r.act;
   S.ignored = r.ignored;
   S.reviewed = r.reviewed;
   closePopover();
@@ -493,6 +500,7 @@ function selectionBehaviour(scroller, st, rows, isSelectable, idOf, list, onChan
     if (id === undefined || !isSelectable(i)) return;
     if (on === undefined) on = !st.sel.has(id);
     on ? st.sel.add(id) : st.sel.delete(id);
+    if (st.onTouch) st.onTouch(id);
   };
   const range = (a, b, on) => {
     for (let i = Math.min(a, b); i <= Math.max(a, b); i++) toggle(i, on);
@@ -547,10 +555,10 @@ function selectionBehaviour(scroller, st, rows, isSelectable, idOf, list, onChan
 }
 
 function rowActions(id) {
-  return `<div class="rowacts"><button class="linkbtn quiet" data-act="show" data-id="${id}" title="Show in File Explorer">Show</button><button class="linkbtn quiet" data-act="keep" data-id="${id}" title="Never suggest this file again">Keep</button></div>`;
+  return `<div class="rowacts"><button class="linkbtn quiet" data-act="show" data-id="${id}" title="Show in File Explorer">Show</button><button class="linkbtn quiet" data-act="keep" data-id="${id}" title="Never suggest this file again">Keep</button><button class="linkbtn quiet" data-act="hide" data-id="${id}" title="Take this folder out of view: files in it are not shown, selected or acted on">Hide folder</button></div>`;
 }
 
-function wireRowActions(scroller, after) {
+function wireRowActions(scroller, after, F) {
   scroller.addEventListener('click', async (e) => {
     const b = e.target.closest('button[data-act]');
     if (!b) return;
@@ -559,6 +567,12 @@ function wireRowActions(scroller, after) {
     if (!f) return;
     if (b.dataset.act === 'show') invoke('show_in_folder', { path: f.path }).catch(fail);
     if (b.dataset.act === 'keep') await keepFiles([f.id], after);
+    if (b.dataset.act === 'hide') {
+      F.hideDirs.add(f.dir);
+      for (const st of [S.old, S.dupes]) for (const id of [...st.sel]) if (S.files.get(id)?.dir === f.dir) st.sel.delete(id);
+      toast(`Hiding ${esc(f.dir)}. “${F.hideDirs.size} folder${F.hideDirs.size === 1 ? '' : 's'} hidden” in the bar shows it again.`);
+      after();
+    }
   });
 }
 
@@ -658,14 +672,14 @@ function wireSelbar(main, st, visibleIds, refresh, recycleFn) {
   return update;
 }
 
-// ---------- Filters (shared by both result pages) ----------
+// ---------- Filters (one set per job, shared by Results and Act) ----------
 
 const SIZE_STEPS = [0, 1024, 100 * 1024, 1 << 20, 10 << 20, 100 << 20, 1 << 30, 10 * 2 ** 30, Infinity];
 const AGE_STEPS = [0, 1, 7, 30, 91, 182, 365, 730, 1825, Infinity]; // days
 const ageLabel = (d) => (d === 0 || d === Infinity ? 'any' : d < 7 ? d + ' day' : d < 30 ? d / 7 + (d === 7 ? ' week' : ' weeks') : d < 365 ? Math.round(d / 30.4) + (d < 60 ? ' month' : ' months') : d / 365 + (d === 365 ? ' year' : ' years'));
 
 function newFilter() {
-  return { query: '', kinds: new Set(), exts: new Set(), dirs: new Set(), origins: new Set(), sizeMin: 0, sizeMax: SIZE_STEPS.length - 1, olderThan: 0, newerThan: AGE_STEPS.length - 1 };
+  return { query: '', kinds: new Set(), exts: new Set(), dirs: new Set(), origins: new Set(), reasons: new Set(), hideDirs: new Set(), sizeMin: 0, sizeMax: SIZE_STEPS.length - 1, olderThan: 0, newerThan: AGE_STEPS.length - 1 };
 }
 
 const extOf = (f) => (f.ext ? '.' + f.ext : '(no extension)');
@@ -677,14 +691,31 @@ const FACETS = {
   origins: { label: 'From', of: originOf, show: (v) => v },
 };
 
+const rangesActive = (F) => F.sizeMin > 0 || F.sizeMax < SIZE_STEPS.length - 1 || F.olderThan > 0 || F.newerThan < AGE_STEPS.length - 1;
 function filterActive(F) {
-  return F.query.trim() || F.kinds.size || F.exts.size || F.dirs.size || F.origins.size || F.sizeMin > 0 || F.sizeMax < SIZE_STEPS.length - 1 || F.olderThan > 0 || F.newerThan < AGE_STEPS.length - 1;
+  return F.query.trim() || F.kinds.size || F.exts.size || F.dirs.size || F.origins.size || F.reasons.size || F.hideDirs.size || rangesActive(F);
 }
 
-// Does one file pass the filters? `dateOf` is the date the age sliders look at.
-function fileMatches(f, F, dateOf) {
-  const q = F.query.trim().toLowerCase();
-  if (q && !f.path.toLowerCase().includes(q)) return false;
+// The search box: plain text matches anywhere in the path; * and ? work as wildcards.
+let searchMemo = ['', null];
+function searchTest(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return null;
+  if (searchMemo[0] === q) return searchMemo[1];
+  let fn;
+  if (/[*?]/.test(q)) {
+    const re = new RegExp(q.split('').map((c) => (c === '*' ? '.*' : c === '?' ? '.' : c.replace(/[.+^${}()|[\]\\]/g, '\\$&'))).join(''), 'i');
+    fn = (p) => re.test(p);
+  } else fn = (p) => p.toLowerCase().includes(q);
+  searchMemo = [q, fn];
+  return fn;
+}
+
+// Does one file pass the filters? `dateOf` is the date the age sliders look at; `qt` the search
+// test (null when the search is left out or empty).
+function fileMatches(f, F, dateOf, qt) {
+  if (qt && !qt(f.path)) return false;
+  if (F.hideDirs.size && F.hideDirs.has(f.dir)) return false;
   for (const k of Object.keys(FACETS)) if (F[k].size && !F[k].has(FACETS[k].of(f))) return false;
   if (f.size < SIZE_STEPS[F.sizeMin] || f.size > SIZE_STEPS[F.sizeMax]) return false;
   const days = (Date.now() / 1000 - dateOf(f)) / 86400;
@@ -693,72 +724,79 @@ function fileMatches(f, F, dateOf) {
   return true;
 }
 
-function filterBarHtml(F, dateWord, chipsHtml) {
+// The one bar above Results and Act: search, filters, counts, and (on Act) Dry run and Go.
+// `extra` holds buttons that open list-specific panels; `actions` the buttons at the right.
+function topbarHtml(F, extra, actions) {
   const pop = (k) => `<button class="btn small popbtn ${F[k].size ? 'on' : ''}" data-pop="${k}">${FACETS[k].label}${F[k].size ? ` <span class="n">${F[k].size}</span>` : ''} ▾</button>`;
-  const sizeLabel = (i, end) => (i === 0 && !end ? 'no minimum' : SIZE_STEPS[i] === Infinity ? 'no maximum' : size(SIZE_STEPS[i]));
-  return `<div class="filters">
-      <label class="search">${SEARCH_ICON}<input id="q" placeholder="Search name or folder" value="${esc(F.query)}"></label>
-      ${pop('kinds')}${pop('exts')}${pop('dirs')}${pop('origins')}
-      <button class="linkbtn" id="clearFilters" ${filterActive(F) ? '' : 'hidden'}>Clear all filters</button>
-    </div>
-    <div class="filters ranges">
-      <div class="slide">Size from <input type="range" id="sizeMin" min="0" max="${SIZE_STEPS.length - 2}" value="${F.sizeMin}"><output id="sizeMinOut">${sizeLabel(F.sizeMin)}</output>
-        to <input type="range" id="sizeMax" min="1" max="${SIZE_STEPS.length - 1}" value="${F.sizeMax}"><output id="sizeMaxOut">${sizeLabel(F.sizeMax, true)}</output></div>
-      <div class="slide">${dateWord} more than <input type="range" id="older" min="0" max="${AGE_STEPS.length - 2}" value="${F.olderThan}"><output id="olderOut">${ageLabel(AGE_STEPS[F.olderThan])}</output>
-        and less than <input type="range" id="newer" min="1" max="${AGE_STEPS.length - 1}" value="${F.newerThan}"><output id="newerOut">${ageLabel(AGE_STEPS[F.newerThan])}</output> ago</div>
-    </div>
-    ${chipsHtml ? `<div class="filters" style="padding-top:0"><div class="chips">${chipsHtml}</div></div>` : ''}`;
+  return `<div class="topbar">
+    <label class="search" title="* stands for anything, ? for one character">${SEARCH_ICON}<input id="q" placeholder="Search name or folder" value="${esc(F.query)}"></label>
+    ${pop('kinds')}${pop('exts')}${pop('dirs')}${pop('origins')}
+    <button class="btn small popbtn ${rangesActive(F) ? 'on' : ''}" data-pop="ranges">Size and date ▾</button>${extra || ''}
+    <button class="chipbtn on" id="unhideDirs" ${F.hideDirs.size ? '' : 'hidden'} title="Folders you filtered out of view. Press to show them again.">${F.hideDirs.size} folder${F.hideDirs.size === 1 ? '' : 's'} hidden ✕</button>
+    <button class="linkbtn" id="clearFilters" ${filterActive(F) ? '' : 'hidden'}>Clear all filters</button>
+    <span class="grow"></span><span class="counts" id="counts" aria-live="polite"></span>${actions ? `<span class="barbtns">${actions}</span>` : ''}
+  </div>`;
 }
 
-// Wires the bar. `baseFiles()` gives the files the choice lists count over.
-function wireFilterBar(main, F, baseFiles, onChange) {
+// Wires the bar. `baseFiles()` gives the files the choice lists count over; `onChange` runs
+// after any filter changed; `dateWord` names the date the age sliders look at.
+function wireTopbar(main, F, baseFiles, onChange, dateWord) {
   const changed = () => {
     $('#clearFilters', main).hidden = !filterActive(F);
     onChange();
   };
   $('#q', main).oninput = (e) => { F.query = e.target.value; changed(); };
-  const sizeLabel = (i, end) => (i === 0 && !end ? 'no minimum' : SIZE_STEPS[i] === Infinity ? 'no maximum' : size(SIZE_STEPS[i]));
-  const range = (id, key, label, fix) => {
-    $('#' + id, main).oninput = (e) => {
-      F[key] = Number(e.target.value);
-      fix();
-      $('#' + id + 'Out', main).textContent = label(F[key]);
-      changed();
-    };
-  };
-  range('sizeMin', 'sizeMin', (i) => sizeLabel(i), () => { if (F.sizeMax <= F.sizeMin) { F.sizeMax = F.sizeMin + 1; $('#sizeMax', main).value = F.sizeMax; $('#sizeMaxOut', main).textContent = sizeLabel(F.sizeMax, true); } });
-  range('sizeMax', 'sizeMax', (i) => sizeLabel(i, true), () => { if (F.sizeMin >= F.sizeMax) { F.sizeMin = F.sizeMax - 1; $('#sizeMin', main).value = F.sizeMin; $('#sizeMinOut', main).textContent = sizeLabel(F.sizeMin); } });
-  range('older', 'olderThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.newerThan <= F.olderThan) { F.newerThan = F.olderThan + 1; $('#newer', main).value = F.newerThan; $('#newerOut', main).textContent = ageLabel(AGE_STEPS[F.newerThan]); } });
-  range('newer', 'newerThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.olderThan >= F.newerThan) { F.olderThan = F.newerThan - 1; $('#older', main).value = F.olderThan; $('#olderOut', main).textContent = ageLabel(AGE_STEPS[F.olderThan]); } });
   $('#clearFilters', main).onclick = () => {
     Object.assign(F, newFilter());
     render();
   };
-  main.querySelectorAll('[data-pop]').forEach((b) => (b.onclick = (e) => { e.stopPropagation(); openFacet(b, F, b.dataset.pop, baseFiles, () => {
-    const n = F[b.dataset.pop].size;
-    b.classList.toggle('on', n > 0);
-    b.innerHTML = `${FACETS[b.dataset.pop].label}${n ? ` <span class="n">${n}</span>` : ''} ▾`;
-    changed();
-  }); }));
+  $('#unhideDirs', main).onclick = () => { F.hideDirs.clear(); render(); };
+  main.querySelectorAll('[data-pop]').forEach((b) => (b.onclick = (e) => {
+    e.stopPropagation();
+    const k = b.dataset.pop;
+    if (k === 'ranges') {
+      openRanges(b, F, dateWord, () => { b.classList.toggle('on', !!rangesActive(F)); changed(); });
+      return;
+    }
+    openFacet(b, F, k, baseFiles, () => {
+      const n = F[k].size;
+      b.classList.toggle('on', n > 0);
+      b.innerHTML = `${FACETS[k].label}${n ? ` <span class="n">${n}</span>` : ''} ▾`;
+      changed();
+    });
+  }));
 }
+
+// A small panel under a button, closed by a click outside it.
+function openPanel(btn, width, fill) {
+  closePopover();
+  const pop = document.createElement('div');
+  pop.className = 'popover';
+  pop.style.width = width + 'px';
+  document.body.appendChild(pop);
+  fill(pop);
+  const r = btn.getBoundingClientRect();
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8)) + 'px';
+  pop.style.top = r.bottom + 4 + 'px';
+  setTimeout(() => document.addEventListener('mousedown', outside), 0);
+  function outside(e) { if (!pop.contains(e.target) && !btn.contains(e.target)) closePopover(); }
+  closePopover.current = () => { pop.remove(); document.removeEventListener('mousedown', outside); };
+  return pop;
+}
+function closePopover() { if (closePopover.current) { closePopover.current(); closePopover.current = null; } }
 
 // A list of choices with counts and a search box, under its button.
 function openFacet(btn, F, key, baseFiles, onChange) {
-  closePopover();
   const counts = new Map();
   for (const f of baseFiles()) {
     const v = FACETS[key].of(f);
     counts.set(v, (counts.get(v) || 0) + 1);
   }
   const all = [...counts.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
-  const pop = document.createElement('div');
-  pop.className = 'popover';
-  pop.innerHTML = `<input class="popq" placeholder="Find ${esc(FACETS[key].label.toLowerCase())}"><div class="popl"></div>
-    <div class="popf"><button class="linkbtn quiet" data-none>Clear</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
-  document.body.appendChild(pop);
-  const r = btn.getBoundingClientRect();
-  pop.style.left = Math.min(r.left, window.innerWidth - 380) + 'px';
-  pop.style.top = r.bottom + 4 + 'px';
+  const pop = openPanel(btn, 360, (pop) => {
+    pop.innerHTML = `<input class="popq" placeholder="Find ${esc(FACETS[key].label.toLowerCase())}"><div class="popl"></div>
+      <div class="popf"><button class="linkbtn quiet" data-none>Clear</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+  });
   const list = $('.popl', pop);
   const draw = () => {
     const q = $('.popq', pop).value.trim().toLowerCase();
@@ -775,11 +813,40 @@ function openFacet(btn, F, key, baseFiles, onChange) {
   $('[data-done]', pop).onclick = closePopover;
   draw();
   $('.popq', pop).focus();
-  setTimeout(() => document.addEventListener('mousedown', outside), 0);
-  function outside(e) { if (!pop.contains(e.target)) closePopover(); }
-  closePopover.current = () => { pop.remove(); document.removeEventListener('mousedown', outside); };
 }
-function closePopover() { if (closePopover.current) { closePopover.current(); closePopover.current = null; } }
+
+// Size and age sliders in a panel.
+function openRanges(btn, F, dateWord, onChange) {
+  const sizeLabel = (i, end) => (i === 0 && !end ? 'no minimum' : SIZE_STEPS[i] === Infinity ? 'no maximum' : size(SIZE_STEPS[i]));
+  const pop = openPanel(btn, 420, (pop) => {
+    pop.classList.add('ranges');
+    pop.innerHTML = `<div class="rangerow"><b>Size</b>
+        <div class="slide">from <input type="range" id="sizeMin" min="0" max="${SIZE_STEPS.length - 2}" value="${F.sizeMin}"><output id="sizeMinOut">${sizeLabel(F.sizeMin)}</output></div>
+        <div class="slide">to <input type="range" id="sizeMax" min="1" max="${SIZE_STEPS.length - 1}" value="${F.sizeMax}"><output id="sizeMaxOut">${sizeLabel(F.sizeMax, true)}</output></div></div>
+      <div class="rangerow"><b>${esc(dateWord)}</b>
+        <div class="slide">more than <input type="range" id="older" min="0" max="${AGE_STEPS.length - 2}" value="${F.olderThan}"><output id="olderOut">${ageLabel(AGE_STEPS[F.olderThan])}</output> ago</div>
+        <div class="slide">less than <input type="range" id="newer" min="1" max="${AGE_STEPS.length - 1}" value="${F.newerThan}"><output id="newerOut">${ageLabel(AGE_STEPS[F.newerThan])}</output> ago</div></div>
+      <div class="popf"><button class="linkbtn quiet" id="rangeReset">Reset</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+  });
+  const range = (id, key, label, fix) => {
+    $('#' + id, pop).oninput = (e) => {
+      F[key] = Number(e.target.value);
+      fix();
+      $('#' + id + 'Out', pop).textContent = label(F[key]);
+      onChange();
+    };
+  };
+  range('sizeMin', 'sizeMin', (i) => sizeLabel(i), () => { if (F.sizeMax <= F.sizeMin) { F.sizeMax = F.sizeMin + 1; $('#sizeMax', pop).value = F.sizeMax; $('#sizeMaxOut', pop).textContent = sizeLabel(F.sizeMax, true); } });
+  range('sizeMax', 'sizeMax', (i) => sizeLabel(i, true), () => { if (F.sizeMin >= F.sizeMax) { F.sizeMin = F.sizeMax - 1; $('#sizeMin', pop).value = F.sizeMin; $('#sizeMinOut', pop).textContent = sizeLabel(F.sizeMin); } });
+  range('older', 'olderThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.newerThan <= F.olderThan) { F.newerThan = F.olderThan + 1; $('#newer', pop).value = F.newerThan; $('#newerOut', pop).textContent = ageLabel(AGE_STEPS[F.newerThan]); } });
+  range('newer', 'newerThan', (i) => ageLabel(AGE_STEPS[i]), () => { if (F.olderThan >= F.newerThan) { F.olderThan = F.newerThan - 1; $('#older', pop).value = F.olderThan; $('#olderOut', pop).textContent = ageLabel(AGE_STEPS[F.olderThan]); } });
+  $('#rangeReset', pop).onclick = () => {
+    Object.assign(F, { sizeMin: 0, sizeMax: SIZE_STEPS.length - 1, olderThan: 0, newerThan: AGE_STEPS.length - 1 });
+    closePopover();
+    onChange();
+  };
+  $('[data-done]', pop).onclick = closePopover;
+}
 
 // ---------- Resizable columns ----------
 
@@ -791,6 +858,8 @@ function columns(table, key, defs) {
   const apply = () => {
     const tpl = widths.map((w, i) => (i === widths.length - 1 ? `minmax(${w}px, 1fr)` : w + 'px')).join(' ');
     table.style.setProperty('--cols', tpl);
+    // The table scrolls sideways when its columns are wider than the window.
+    table.style.setProperty('--tw', widths.reduce((a, w) => a + w, 0) + widths.length * 12 + 24 + 'px');
   };
   const save = () => { try { localStorage.setItem('sift.cols.' + key, JSON.stringify(widths)); } catch (e) { /* not kept */ } };
   apply();
@@ -822,17 +891,30 @@ function originCell(f) {
   return `<div class="muted" title="${esc(f.originDetail || (f.origin ? '' : 'Windows kept no download mark for this file'))}">${esc(f.origin || '—')}</div>`;
 }
 
+// ---------- Wide table pieces ----------
+
+const TYPE_LABEL = { installer: 'Installer', archive: 'Archive', document: 'Document', disk: 'Disk image', image: 'Image', video: 'Video', audio: 'Audio', torrent: 'Torrent', other: 'Other' };
+const shortDate = (secs) => (secs ? new Date(secs * 1000).toLocaleDateString('sv-SE') : '—');
+const dateCell = (secs) => `<div class="muted" title="${esc(secs ? fullDate(secs) + ' · ' + ago(secs) : 'Windows does not say')}">${shortDate(secs)}</div>`;
+const typeCell = (f) => `<div class="muted" title="${esc(f.ext ? '.' + f.ext : 'No extension')}">${esc(TYPE_LABEL[f.kind] || f.kind)}${f.ext ? ' · ' + esc(f.ext) : ''}</div>`;
+const folderCell = (f) => `<div class="muted cellacts"><span title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>`;
+
+// The columns of both result tables: the last one says why (old) or what kind of match.
+const wideCols = (sortable, last, lastSort) => [
+  { label: '<input type="checkbox" class="check" id="allBox" title="Select all shown">', w: 22, fixed: true },
+  { label: 'Name', sort: sortable && 'name', w: 240 },
+  { label: 'Folder', sort: sortable && 'dir', w: 220 },
+  { label: 'Size', sort: sortable && 'size', w: 76, num: true },
+  { label: 'Modified', sort: sortable && 'modified', w: 92 },
+  { label: 'Created', sort: sortable && 'created', w: 92 },
+  { label: 'Type', sort: sortable && 'kind', w: 120 },
+  { label: 'From', sort: sortable && 'origin', w: 120 },
+  { label: last, sort: sortable && lastSort, w: 200 },
+];
+
 // ---------- Old downloads ----------
 
-const OLD_COLS = [
-  { label: '<input type="checkbox" class="check" id="allBox" title="Select all shown">', w: 22, fixed: true },
-  { label: 'Name', sort: 'name', w: 260 },
-  { label: 'Why it looks old', sort: 'why', w: 250 },
-  { label: 'Size', sort: 'size', w: 80, num: true },
-  { label: 'Last used', sort: 'touched', w: 110 },
-  { label: 'From', sort: 'origin', w: 130 },
-  { label: 'Folder', sort: 'dir', w: 220 },
-];
+const OLD_COLS = wideCols(true, 'Why it looks old', 'why');
 
 function oldBase() {
   return S.result.old.map((o) => S.files.get(o.file)).filter((f) => f && !f.kept);
@@ -850,20 +932,23 @@ const OLD_GROUPS = {
   reason: { label: 'Main reason', key: (f, o) => REASON[[...o.signals].sort(STRONG_FIRST)[0].type].label },
 };
 
-function oldItems() {
+// The old downloads the filters show. On Act the view-only choice "Only selected" is left out.
+function oldItems(act) {
   const st = S.old;
-  let items = S.result.old.filter((o) => {
+  const qt = searchTest(st.f.query);
+  const items = S.result.old.filter((o) => {
     const f = S.files.get(o.file);
     if (!f || f.kept) return false;
-    if (st.onlySel && !st.sel.has(f.id)) return false;
-    if (st.reasons.size && !o.signals.some((s) => st.reasons.has(s.type))) return false;
-    return fileMatches(f, st.f, (x) => x.touched);
+    if (!act && st.onlySel && !st.sel.has(f.id)) return false;
+    if (st.f.reasons.size && !o.signals.some((s) => st.f.reasons.has(s.type))) return false;
+    return fileMatches(f, st.f, (x) => x.touched, qt);
   });
+  if (act) return items;
   const k = st.sort.key;
   const dir = st.sort.asc ? 1 : -1;
   const val = (o) => {
     const f = S.files.get(o.file);
-    return k === 'name' ? f.name.toLowerCase() : k === 'size' ? f.size : k === 'touched' ? f.touched : k === 'origin' ? f.origin || '￿' : k === 'dir' ? f.dir.toLowerCase() : o.signals.length;
+    return k === 'name' ? f.name.toLowerCase() : k === 'size' ? f.size : k === 'modified' ? f.modified : k === 'created' ? f.created : k === 'kind' ? f.kind : k === 'origin' ? f.origin || '￿' : k === 'dir' ? f.dir.toLowerCase() : o.signals.length;
   };
   items.sort((a, b) => { const x = val(a), y = val(b); return x < y ? -dir : x > y ? dir : 0; });
   return items;
@@ -873,6 +958,7 @@ function oldItems() {
 function oldRows() {
   const st = S.old;
   const items = oldItems();
+  st.shownCount = items.length;
   const by = OLD_GROUPS[st.groupBy];
   if (!by || !by.key) return items.map((o) => ({ o, id: o.file }));
   const groups = new Map();
@@ -891,9 +977,12 @@ function oldRows() {
   return rows;
 }
 
+const selBytes = (st) => [...st.sel].reduce((a, id) => a + (S.files.get(id)?.size || 0), 0);
+
 function renderOld(main) {
   if (!S.result) return noResult(main, 'Old downloads');
   const st = S.old;
+  const F = st.f;
   const r = S.result;
   const total = r.old.reduce((a, o) => a + (S.files.get(o.file)?.size || 0), 0);
   const reasonCounts = {};
@@ -902,15 +991,15 @@ function renderOld(main) {
     if (!f || f.kept) continue;
     for (const s of o.signals) reasonCounts[s.type] = (reasonCounts[s.type] || 0) + 1;
   }
-  const reasonChips = Object.keys(REASON).filter((k) => reasonCounts[k]).map((k) =>
-    `<button class="chipbtn ${st.reasons.has(k) ? 'on' : ''}" data-reason="${k}">${REASON[k].label}<span class="n">${nf.format(reasonCounts[k])}</span></button>`).join('') +
-    `<span class="chipsep"></span><button class="chipbtn ${st.onlySel ? 'on' : ''}" id="onlySel" title="Show only what you selected, to look it over before removing">Only selected</button>`;
   const groupOpts = Object.entries(OLD_GROUPS).map(([k, v]) => `<option value="${k}" ${st.groupBy === k ? 'selected' : ''}>${v.label}</option>`).join('');
+  const extra = `<button class="btn small popbtn ${F.reasons.size ? 'on' : ''}" id="whyPop">Why it looks old${F.reasons.size ? ` <span class="n">${F.reasons.size}</span>` : ''} ▾</button>
+    <button class="chipbtn ${st.onlySel ? 'on' : ''}" id="onlySel" title="Show only what you selected, to look it over before removing">Only selected</button>`;
 
   main.innerHTML = header('Old downloads', `${nf.format(r.old.length)} files that look like leftovers · ${size(total)}`,
     `<div class="tools"><span class="slide">Group by <select id="groupBy" class="btn small">${groupOpts}</select></span>
-      <button class="btn small" id="foldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Fold all</button><button class="btn small" id="unfoldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Unfold all</button></div>`) +
-    filterBarHtml(st.f, 'Last used', reasonChips) + `
+      <button class="btn small" id="foldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Fold all</button><button class="btn small" id="unfoldAll" ${st.groupBy === 'none' ? 'hidden' : ''}>Unfold all</button>
+      <button class="btn small" id="recheck" title="Look at the files on disk again and drop what is gone or changed">Re-check files</button></div>`) +
+    topbarHtml(F, extra) + `
     <div class="table" id="table">
       <div class="thead">${headCells(OLD_COLS, st)}</div>
       <div class="scroller" id="list" tabindex="0"></div>
@@ -946,18 +1035,20 @@ function renderOld(main) {
       cls: `${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
       html: `<div><input type="checkbox" class="check" tabindex="-1" ${sel ? 'checked' : ''} ${canSelect(f) ? '' : 'disabled'}></div>
         <div class="name" title="${esc(f.name)}">${esc(f.name)} ${lock}</div>
-        <div title="${esc(o.signals.map((s) => REASON[s.type].tip(s)).join('\n'))}">${chips}</div>
+        ${folderCell(f)}
         <div class="num">${size(f.size)}</div>
-        <div class="muted" title="${esc(fullDate(f.touched))}">${ago(f.touched)}</div>
-        ${originCell(f)}
-        <div class="muted cellacts"><span title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>`,
+        ${dateCell(f.modified)}${dateCell(f.created)}${typeCell(f)}${originCell(f)}
+        <div title="${esc(o.signals.map((s) => REASON[s.type].tip(s)).join('\n'))}">${chips}</div>`,
     };
   };
   const fileIds = () => rows.filter((x) => x.id !== undefined).map((x) => x.id);
   let list = virtualList(scroller, rows.length, rowHtml);
   const markMixed = () => scroller.querySelectorAll('[data-mixed]').forEach((c) => (c.indeterminate = true));
   const redraw = () => { list.redraw(); markMixed(); };
-  const updateSel = wireSelbar(main, st, fileIds, () => { redraw(); updateSel(); updateAll(); }, () => setStep('act'));
+  const counts = () => {
+    $('#counts', main).textContent = `${nf.format(st.shownCount)} of ${nf.format(r.old.length)} files shown · ${size(selBytes(st))} selected`;
+  };
+  const updateSel = wireSelbar(main, st, fileIds, () => { redraw(); updateSel(); updateAll(); counts(); }, () => setStep('act'));
   const updateAll = () => {
     const box = $('#allBox', main);
     const ids = fileIds();
@@ -965,9 +1056,9 @@ function renderOld(main) {
     box.checked = ids.length > 0 && n === ids.length;
     box.indeterminate = n > 0 && n < ids.length;
   };
-  const changed = () => { updateSel(); updateAll(); };
+  const changed = () => { updateSel(); updateAll(); counts(); };
   selectionBehaviour(scroller, st, () => rows, (i) => canSelect(S.files.get(rows[i].id)), (i) => rows[i]?.id, { redraw, reveal: (i) => { list.reveal(i); markMixed(); } }, changed, () => setStep('act'));
-  wireRowActions(scroller, () => render());
+  wireRowActions(scroller, () => render(), st.f);
   scroller.addEventListener('click', (e) => {
     const hc = e.target.closest('[data-headcheck]');
     const fb = e.target.closest('[data-fold]');
@@ -998,16 +1089,33 @@ function renderOld(main) {
     st.anchor = -1;
     rebuild();
   };
-  wireFilterBar(main, st.f, oldBase, refilter);
+  wireTopbar(main, F, oldBase, refilter, 'Last used');
+  $('#whyPop', main).onclick = (e) => {
+    e.stopPropagation();
+    const b = e.currentTarget;
+    openPanel(b, 300, (pop) => {
+      pop.innerHTML = `<div class="popl">${Object.keys(REASON).filter((k) => reasonCounts[k]).map((k) => `<label class="popi"><input type="checkbox" class="check" data-reason="${k}" ${F.reasons.has(k) ? 'checked' : ''}><span class="p">${REASON[k].label}</span><span class="n">${nf.format(reasonCounts[k])}</span></label>`).join('')}</div>
+        <div class="popf"><button class="linkbtn quiet" data-none>Clear</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+      pop.querySelectorAll('[data-reason]').forEach((c) => (c.onchange = () => {
+        c.checked ? F.reasons.add(c.dataset.reason) : F.reasons.delete(c.dataset.reason);
+        b.classList.toggle('on', F.reasons.size > 0);
+        b.innerHTML = `Why it looks old${F.reasons.size ? ` <span class="n">${F.reasons.size}</span>` : ''} ▾`;
+        $('#clearFilters', main).hidden = !filterActive(F);
+        refilter();
+      }));
+      $('[data-none]', pop).onclick = () => { F.reasons.clear(); pop.querySelectorAll('[data-reason]').forEach((c) => (c.checked = false)); b.classList.remove('on'); b.innerHTML = 'Why it looks old ▾'; $('#clearFilters', main).hidden = !filterActive(F); refilter(); };
+      $('[data-done]', pop).onclick = closePopover;
+    });
+  };
   $('#groupBy', main).onchange = (e) => { st.groupBy = e.target.value; st.folded.clear(); render(); };
   $('#foldAll', main).onclick = () => { for (const x of rows) if (x.head) st.folded.add(x.head.key); rebuild(); };
   $('#unfoldAll', main).onclick = () => { st.folded.clear(); rebuild(); };
+  $('#recheck', main).onclick = () => recheckFiles();
   $('#onlySel', main).onclick = (e) => { st.onlySel = !st.onlySel; e.target.closest('button').classList.toggle('on', st.onlySel); rebuild(); };
-  main.querySelectorAll('[data-reason]').forEach((b) => (b.onclick = () => { st.reasons.has(b.dataset.reason) ? st.reasons.delete(b.dataset.reason) : st.reasons.add(b.dataset.reason); b.classList.toggle('on'); refilter(); }));
   main.querySelectorAll('[data-sort]').forEach((h) => (h.onclick = (e) => {
     if (e.target.closest('.grip')) return;
     const k = h.dataset.sort;
-    if (st.sort.key === k) st.sort.asc = !st.sort.asc; else st.sort = { key: k, asc: k === 'name' || k === 'dir' || k === 'origin' || k === 'touched' };
+    if (st.sort.key === k) st.sort.asc = !st.sort.asc; else st.sort = { key: k, asc: k === 'name' || k === 'dir' || k === 'origin' || k === 'kind' };
     main.querySelectorAll('[data-sort]').forEach((x) => { x.classList.toggle('on', x.dataset.sort === st.sort.key); x.classList.toggle('asc', x.dataset.sort === st.sort.key && st.sort.asc); });
     rebuild();
   }));
@@ -1018,17 +1126,21 @@ function renderOld(main) {
   };
 }
 
+// Looks at the files on disk again; what is gone or changed drops out of the lists.
+async function recheckFiles() {
+  await flushState();
+  try {
+    const p = JSON.parse(await invoke('job_open', { id: S.jobId }));
+    applyOpened(S.jobId, p);
+    await loadOverview();
+    render();
+    toast(p.dropped ? `${nf.format(p.dropped)} file${p.dropped === 1 ? ' was' : 's were'} gone or changed since the scan and left out.` : 'Every file is still there, as scanned.');
+  } catch (e) { fail(e); }
+}
+
 // ---------- Duplicates ----------
 
-
-const DUP_COLS = [
-  { label: '', w: 22, fixed: true },
-  { label: 'Name', w: 300 },
-  { label: 'Folder', w: 300 },
-  { label: 'Size', w: 80, num: true },
-  { label: 'Changed', w: 110 },
-  { label: 'From', w: 130 },
-];
+const DUP_COLS = wideCols(false, 'Match', null).map((c, i) => (i === 0 ? { label: '', w: 22, fixed: true } : c));
 
 function dupBase() {
   const seen = new Set();
@@ -1065,8 +1177,8 @@ const CHAIN_RULES = {
 const DEFAULT_CHAIN = ['folderOrder', 'notRemoveFirst', 'nomark', 'suggested'];
 const chain = () => pref('keepChain', DEFAULT_CHAIN).map((k) => (k === 'preferred' ? 'folderOrder' : k)).filter((k, i, a) => CHAIN_RULES[k] && a.indexOf(k) === i);
 
-function pickByRules(g, rules) {
-  const ids = g.files.filter((id) => S.files.has(id));
+// The file that stays among `ids` (the files of the group that are shown).
+function pickByRules(g, rules, ids) {
   let best = ids[0];
   for (const id of ids.slice(1)) {
     for (const k of rules) {
@@ -1080,6 +1192,7 @@ function pickByRules(g, rules) {
 
 const QUICK = {
   mine: { label: 'by my rules', rules: () => chain() },
+  folderOrder: { label: 'folder order', rules: () => ['folderOrder', 'suggested'] },
   newest: { label: 'newest', rules: () => ['newest'] },
   oldest: { label: 'oldest', rules: () => ['oldest'] },
   largest: { label: 'largest', rules: () => ['largest'] },
@@ -1088,22 +1201,33 @@ const QUICK = {
   suggested: { label: 'Sift’s pick', rules: () => ['suggested'] },
 };
 
-// In each group one file stays and the rest is selected. Kept and protected files always stay;
-// when a group has one, nothing else in it needs to stay.
+// The files of a group that the filters show. Select actions only ever touch these.
+const visOf = (g) => S.dupes.vis.get(g) || g.files.filter((id) => S.files.has(id));
+
+// A group counts as reviewed once you act on it (or press R).
+function markReviewed(g, on = true) {
+  if (S.reviewed.has(g.key) === on) return;
+  on ? S.reviewed.add(g.key) : S.reviewed.delete(g.key);
+  queueSave();
+  updateBadge(S.jobId);
+}
+
+// In each group one of the shown files stays and the other shown files are selected. Kept and
+// protected files always stay; when a group has one, nothing else in it needs to stay.
 function keepOne(groups, pick) {
   const st = S.dupes;
   for (const g of groups) {
-    const fixed = g.files.filter((id) => S.files.has(id) && !canSelect(S.files.get(id)));
-    const keepId = fixed.length ? null : pick(g);
-    for (const id of g.files) {
-      const f = S.files.get(id);
-      if (!f) continue;
-      if (id === keepId || !canSelect(f)) st.sel.delete(id);
+    const ids = visOf(g);
+    markReviewed(g);
+    const fixed = ids.filter((id) => !canSelect(S.files.get(id)));
+    const keepId = fixed.length ? null : pick(g, ids);
+    for (const id of ids) {
+      if (id === keepId || !canSelect(S.files.get(id))) st.sel.delete(id);
       else st.sel.add(id);
     }
   }
 }
-const keepAll = (groups) => { for (const g of groups) for (const id of g.files) S.dupes.sel.delete(id); };
+const keepAll = (groups) => { for (const g of groups) { markReviewed(g); for (const id of visOf(g)) S.dupes.sel.delete(id); } };
 
 function openRules(onApply) {
   const d = $('#confirm');
@@ -1151,20 +1275,34 @@ function openRules(onApply) {
 
 // ---------- Duplicates list ----------
 
-// A group shows when at least one of its files passes the filters; then all its files show,
-// so you always see what a file is a duplicate of.
-function groupsShown() {
+// A group shows when at least one of its files passes the filters (and, when searching, one of
+// those matches the search); then the files that pass are shown. On Act the choices that only
+// shape the Results view (which kinds, which show-state) are left out: the levels there say it.
+function groupsShown(act) {
   const st = S.dupes;
+  const F = st.f;
+  const qt = searchTest(F.query);
+  st.vis = new Map();
   let out = S.result.groups.filter((g) => {
-    if (st.kinds.size ? !st.kinds.has(g.kind) : !(GROUP[g.kind].main || st.notSure)) return false;
-    const fs = g.files.map((id) => S.files.get(id)).filter(Boolean);
-    if (fs.length < 2) return false;
-    if (!st.showDismissed && S.ignored.has(g.key)) return false;
-    const nSel = g.files.filter((id) => st.sel.has(id)).length;
-    if (st.show === 'undecided' && nSel) return false;
-    if (st.show === 'selected' && !nSel) return false;
-    return fs.some((f) => fileMatches(f, st.f, (x) => x.modified));
+    if (!act && (st.kinds.size ? !st.kinds.has(g.kind) : !(GROUP[g.kind].main || st.notSure))) return false;
+    if (S.ignored.has(g.key) && !(st.showDismissed && !act)) return false;
+    if (g.files.filter((id) => S.files.has(id)).length < 2) return false;
+    const ok = g.files.map((id) => S.files.get(id)).filter((f) => f && fileMatches(f, F, (x) => x.modified, null));
+    if (!ok.length) return false;
+    if (qt && !ok.some((f) => qt(f.path))) return false;
+    if (!act && st.hideSingles && ok.length < 2) return false;
+    const ids = ok.map((f) => f.id);
+    if (!act) {
+      const nSel = ids.filter((id) => st.sel.has(id)).length;
+      if (st.show === 'undecided' && nSel) return false;
+      if (st.show === 'selected' && !nSel) return false;
+      if (st.show === 'multiKept' && !(nSel && ids.length - nSel >= 2)) return false;
+      if (st.show === 'allKept' && !(!nSel && S.reviewed.has(g.key))) return false;
+    }
+    st.vis.set(g, ids);
+    return true;
   });
+  if (act) return out;
   const by = st.gsort;
   if (by === 'freed') out = out.slice().sort((a, b) => freeable(b) - freeable(a));
   else if (by === 'count') out = out.slice().sort((a, b) => b.files.length - a.files.length);
@@ -1176,38 +1314,40 @@ function freeable(g) {
   return g.files.reduce((a, id) => a + (id === g.suggested ? 0 : S.files.get(id)?.size || 0), 0);
 }
 
+const SHOW_STATES = [['all', 'All groups'], ['undecided', 'Nothing selected yet'], ['selected', 'Something selected'], ['multiKept', 'More than one file kept'], ['allKept', 'Everything kept (looked at, none selected)']];
+
 function renderDupes(main) {
   if (!S.result) return noResult(main, 'Duplicates');
   const st = S.dupes;
+  const F = st.f;
   const r = S.result;
   const counts = {};
   for (const g of r.groups) counts[g.kind] = (counts[g.kind] || 0) + 1;
   const mainCount = r.groups.filter((g) => GROUP[g.kind].main).length;
   const notSureCount = r.groups.length - mainCount;
   const totalFree = r.groups.filter((g) => g.kind === 'copies').reduce((a, g) => a + freeable(g), 0);
-  const dismissedCount = S.ignored.size;
-  const chip = (k) => `<button class="chipbtn ${st.kinds.has(k) ? 'on' : ''}" data-gkind="${k}" title="${esc(GROUP[k].tip)}">${GROUP[k].label}<span class="n">${nf.format(counts[k] || 0)}</span></button>`;
-  const mainKinds = Object.keys(GROUP).filter((k) => GROUP[k].main);
-  const sureKinds = Object.keys(GROUP).filter((k) => !GROUP[k].main && counts[k]);
-  const showChip = (k, label, tip) => `<button class="chipbtn ${st.show === k ? 'on' : ''}" data-show="${k}" title="${tip}">${label}</button>`;
-  const chips = mainKinds.map(chip).join('') +
-    (notSureCount ? `<span class="chipsep"></span><button class="chipbtn ${st.notSure ? 'on' : ''}" id="notSure" title="Groups that may or may not be duplicates. Hidden unless you ask.">${st.notSure ? 'Hide' : 'Show'} not sure<span class="n">${nf.format(notSureCount)}</span></button>` +
-      (st.notSure || sureKinds.some((k) => st.kinds.has(k)) ? sureKinds.map(chip).join('') : '') : '') +
-    `<span class="chipsep"></span>${showChip('all', 'All groups', 'Every group')}${showChip('undecided', 'Undecided', 'Groups where nothing is selected yet')}${showChip('selected', 'With a selection', 'Groups where something is selected, to look it over')}` +
-    (dismissedCount ? `<span class="chipsep"></span><button class="chipbtn ${st.showDismissed ? 'on' : ''}" id="showDismissed" title="Groups you marked as not duplicates">Not duplicates<span class="n">${dismissedCount}</span></button>` : '');
+  const viewOn = () => st.show !== 'all' || st.hideSingles || st.showDismissed;
+  const extra = `<button class="btn small popbtn ${st.kinds.size || st.notSure ? 'on' : ''}" id="certPop">Certainty ▾</button>
+    <button class="btn small popbtn ${viewOn() ? 'on' : ''}" id="viewPop">Groups ▾</button>`;
   const sortOpts = [['kind', 'kind'], ['freed', 'space freed'], ['count', 'number of files'], ['name', 'name']].map(([k, l]) => `<option value="${k}" ${st.gsort === k ? 'selected' : ''}>${l}</option>`).join('');
 
   main.innerHTML = header('Duplicates', `${nf.format(mainCount)} groups of duplicates · the extra copies take ${size(totalFree)}` + (notSureCount ? ` · ${nf.format(notSureCount)} more groups not sure` : ''),
-    `<div class="tools"><span class="slide">Sort groups by <select id="gsort" class="btn small">${sortOpts}</select></span></div>`) +
+    `<div class="tools"><span class="slide">Sort groups by <select id="gsort" class="btn small">${sortOpts}</select></span>
+      <button class="btn small" id="recheck" title="Look at the files on disk again and drop what is gone or changed">Re-check files</button></div>`) +
+    topbarHtml(F, extra) +
     `<div class="globalkeep"><span class="muted">In every group shown, keep</span>
       <button class="btn small primary" data-allrule="mine" title="${esc(chain().map((k, i) => i + 1 + '. ' + CHAIN_RULES[k].label).join('\n'))}">by my rules</button>
       <button class="btn small" id="editRules">Rules…</button>
-      ${Object.entries(QUICK).filter(([k]) => k !== 'mine').map(([k, v]) => `<button class="btn small" data-allrule="${k}">${esc(v.label)}</button>`).join('')}
-      <span class="muted">· or</span><button class="btn small" id="keepAllShown" title="Unselect every file in the groups shown">keep all</button>
-      <span class="grow"></span><span class="muted" id="decided"></span>
-      <button class="linkbtn" id="keysBtn">Keys</button></div>
-    <div class="keyhelp" id="keyhelp" ${st.keys ? '' : 'hidden'}>↑ ↓ move · Space tick · J / K next or previous group · 1–9 keep that file, tick the others · A keep by my rules · U keep all in group · N not duplicates · Delete move selected to Recycle Bin</div>` +
-    filterBarHtml(st.f, 'Changed', chips) + `
+      ${Object.entries(QUICK).filter(([k]) => k !== 'mine' && k !== 'suggested').map(([k, v]) => `<button class="btn small" data-allrule="${k}">${esc(v.label)}</button>`).join('')}
+      <button class="btn small" id="keepAllShown" title="Unselect every shown file in the groups shown">keep all</button>
+      <span class="chipsep"></span>
+      <button class="btn small" id="acceptSure" title="In every sure group (copies, versions) keep the file Sift would keep">Accept Sift’s pick in sure groups</button>
+      <button class="btn small" id="keepMatching" title="Keep the files matching the search, select the other shown files of those groups">Keep matching</button>
+      <button class="btn small" id="removeMatching" title="Select the files matching the search; never every file of a group">Remove matching</button>
+      <button class="btn small" id="ignoreShown" title="Hide the groups shown for this job. They can be brought back from Groups ▾.">Ignore shown groups</button>
+      <button class="btn small" id="nextUnrev" title="Jump to the next group not looked at (N)">Next unreviewed</button>
+      <span class="grow"></span><button class="linkbtn" id="keysBtn">Keys</button></div>
+    <div class="keyhelp" id="keyhelp" ${st.keys ? '' : 'hidden'}>↑ ↓ move · Space tick · J / K next or previous group · N next group not reviewed · R mark reviewed · 1–9 keep that file, tick the others · A keep by my rules · U keep all in group · I not duplicates · Delete go to Act</div>
     <div class="table" id="table">
       <div class="thead">${headCells(DUP_COLS, st)}</div>
       <div class="scroller" id="list" tabindex="0"></div>
@@ -1216,60 +1356,69 @@ function renderDupes(main) {
 
   let groups = [];
   let rows = [];
+  const owner = new Map();
   const build = () => {
     groups = groupsShown();
     rows = [];
+    owner.clear();
     for (const g of groups) {
       rows.push({ g });
       let n = 0;
-      for (const id of g.files) if (S.files.has(id)) rows.push({ g, id, n: ++n });
+      for (const id of visOf(g)) { rows.push({ g, id, n: ++n }); owner.set(id, g); }
     }
   };
   build();
+  st.onTouch = (id) => { const g = owner.get(id); if (g) markReviewed(g); };
   const scroller = $('#list', main);
   const rowHtml = (i) => {
     const row = rows[i];
     const g = row.g;
     if (row.id === undefined) {
-      const n = g.files.length;
-      const sizes = new Set(g.files.map((id) => S.files.get(id)?.size));
+      const ids = visOf(g);
+      const sizes = new Set(ids.map((id) => S.files.get(id)?.size));
       const each = sizes.size === 1 ? `${size([...sizes][0])} each` : 'different sizes';
-      const nSel = g.files.filter((id) => st.sel.has(id)).length;
+      const nSel = ids.filter((id) => st.sel.has(id)).length;
       const tip = g.fingerprint ? `Compared byte for byte: identical.\nFingerprint (MD5): ${g.fingerprint}` : GROUP[g.kind].tip;
       const isDismissed = st.showDismissed && S.ignored.has(g.key);
+      const rev = S.reviewed.has(g.key);
       return {
         cls: 'group',
-        html: `<div title="${esc(tip)}"><b>${esc(GROUP[g.kind].label)}</b> · ${esc(g.label)} · ${n} files · ${each}${nSel ? ` · <span class="accentText">${nSel} selected</span>` : ''}</div>
+        html: `<div title="${esc(tip)}"><b>${esc(GROUP[g.kind].label)}</b> · ${esc(g.label)} · ${ids.length}${ids.length < g.files.length ? ' of ' + g.files.length : ''} files · ${each}${nSel ? ` · <span class="accentText">${nSel} selected</span>` : ''}${rev ? ' <span class="tag accent" title="You looked at this group">reviewed ✓</span>' : ''}</div>
           <div class="acts">Keep: <button class="linkbtn" data-rule="mine" data-g="${i}">my rules</button><button class="linkbtn" data-rule="newest" data-g="${i}">newest</button><button class="linkbtn" data-rule="oldest" data-g="${i}">oldest</button><button class="linkbtn" data-rule="largest" data-g="${i}">largest</button><button class="linkbtn" data-rule="all" data-g="${i}">all</button>
+          <button class="linkbtn quiet" data-review="${i}" title="${rev ? 'Take the reviewed mark off (R)' : 'Mark as looked at (R)'}">${rev ? 'Not reviewed' : 'Reviewed'}</button>
           <button class="linkbtn quiet" data-dismiss="${i}" title="${isDismissed ? 'Show this group as duplicates again' : 'Hide this group: these are not duplicates (remembered)'}">${isDismissed ? 'Duplicates after all' : 'Not duplicates'}</button></div>`,
       };
     }
     const f = S.files.get(row.id);
     const sel = st.sel.has(f.id);
+    const stays = !sel && g.files.some((id) => st.sel.has(id));
     const tags = (f.kept ? '<span class="tag">kept</span>' : '') + (!f.kept && isProtected(f) ? '<span class="tag" title="Protected by a path pattern">protected</span>' : '') + (row.id === g.suggested && !f.kept ? `<span class="tag accent" title="The one Sift would keep">Sift’s pick</span>` : '');
     return {
-      cls: `member ${sel ? 'sel' : ''} ${st.focus === i ? 'focus' : ''}`,
+      cls: `member ${sel ? 'sel' : ''} ${stays ? 'stays' : ''} ${st.focus === i ? 'focus' : ''}`,
       html: `<div><input type="checkbox" class="check" tabindex="-1" ${sel ? 'checked' : ''} ${canSelect(f) ? '' : 'disabled'}></div>
-        <div class="name" title="${esc(f.name)}">${row.n <= 9 && st.focus >= 0 && rows[st.focus]?.g === g ? `<span class="keynum">${row.n}</span>` : ''}${esc(f.name)} ${tags}</div>
-        <div class="muted cellacts"><span title="${esc(f.dir)}">${esc(f.dir)}</span>${rowActions(f.id)}</div>
+        <div class="name" title="${esc(f.name)}${stays ? '\nThis one stays' : ''}">${row.n <= 9 && st.focus >= 0 && rows[st.focus]?.g === g ? `<span class="keynum">${row.n}</span>` : ''}${esc(f.name)} ${tags}</div>
+        ${folderCell(f)}
         <div class="num">${size(f.size)}</div>
-        <div class="muted" title="${esc(fullDate(f.modified))}">${ago(f.modified)}</div>
-        ${originCell(f)}`,
+        ${dateCell(f.modified)}${dateCell(f.created)}${typeCell(f)}${originCell(f)}
+        <div class="muted" title="${esc(GROUP[g.kind].tip)}">${esc(GROUP[g.kind].label)}</div>`,
     };
   };
   let list = virtualList(scroller, rows.length, rowHtml);
   const visibleIds = () => rows.filter((x) => x.id !== undefined).map((x) => x.id);
   const decided = () => {
-    const d = groups.filter((g) => g.files.some((id) => st.sel.has(id))).length;
+    const d = groups.filter((g) => visOf(g).some((id) => st.sel.has(id))).length;
     $('#decided', main).textContent = groups.length ? `${nf.format(d)} of ${nf.format(groups.length)} groups have a selection` : '';
   };
+  const countsText = () => {
+    $('#counts', main).textContent = `${nf.format(groups.length)} of ${nf.format(r.groups.length)} groups shown · ${size(selBytes(st))} selected · ${nf.format(S.reviewed.size)} reviewed`;
+  };
   const updateSelBase = wireSelbar(main, st, visibleIds, () => { list.redraw(); updateSel(); }, () => setStep('act'));
-  const updateSel = () => { updateSelBase(); decided(); };
+  const updateSel = () => { updateSelBase(); countsText(); };
   selectionBehaviour(scroller, st, () => rows, (i) => rows[i].id !== undefined && canSelect(S.files.get(rows[i].id)), (i) => rows[i]?.id, { redraw: () => list.redraw(), reveal: (i) => list.reveal(i) }, updateSel, () => setStep('act'));
-  wireRowActions(scroller, () => render());
+  wireRowActions(scroller, () => render(), st.f);
   const applyQuick = (gs, rule) => {
     if (rule === 'all') keepAll(gs);
-    else { const rules = QUICK[rule].rules(); keepOne(gs, (g) => pickByRules(g, rules)); }
+    else { const rules = QUICK[rule].rules(); keepOne(gs, (g, ids) => pickByRules(g, rules, ids)); }
   };
   const toggleDismiss = async (g) => {
     const had = S.ignored.has(g.key);
@@ -1280,17 +1429,35 @@ function renderDupes(main) {
   scroller.addEventListener('click', async (e) => {
     const b = e.target.closest('button[data-rule]');
     const dm = e.target.closest('button[data-dismiss]');
-    if (!b && !dm) return;
+    const rv = e.target.closest('button[data-review]');
+    if (!b && !dm && !rv) return;
     e.stopPropagation();
     if (b) {
       applyQuick([rows[Number(b.dataset.g)].g], b.dataset.rule);
       list.redraw(); updateSel();
+    } else if (rv) {
+      const g = rows[Number(rv.dataset.review)].g;
+      markReviewed(g, !S.reviewed.has(g.key));
+      list.redraw(); updateSel();
     } else {
       const hid = await toggleDismiss(rows[Number(dm.dataset.dismiss)].g);
-      if (hid) toast('Hidden as not duplicates. “Not duplicates” in the filters shows them again.');
+      if (hid) toast('Hidden as not duplicates. “Groups” in the bar brings them back.');
       render();
     }
   });
+  // Jump to the first file of the next group not looked at, after the focused one (wrapping).
+  const nextUnreviewed = () => {
+    const cur = rows[st.focus];
+    const gi = cur ? groups.indexOf(cur.g) : -1;
+    for (let k = 1; k <= groups.length; k++) {
+      const g = groups[(gi + k) % groups.length];
+      if (!S.reviewed.has(g.key)) {
+        const i = rows.findIndex((x) => x.g === g && x.id !== undefined);
+        if (i >= 0) { st.focus = i; st.anchor = i; list.reveal(i); scroller.focus({ preventScroll: true }); return; }
+      }
+    }
+    toast('Every group shown has been looked at.');
+  };
   // Keyboard review on top of the arrows and Space from selectionBehaviour.
   scroller.addEventListener('keydown', async (e) => {
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -1309,12 +1476,14 @@ function renderDupes(main) {
     };
     if (k === 'j') { e.preventDefault(); jump(1); }
     else if (k === 'k') { e.preventDefault(); jump(-1); }
+    else if (k === 'n') { e.preventDefault(); nextUnreviewed(); }
+    else if (cur && k === 'r') { markReviewed(cur.g, !S.reviewed.has(cur.g.key)); list.redraw(); updateSel(); }
     else if (cur && /^[1-9]$/.test(k)) {
       const target = rows.find((x) => x.g === cur.g && x.n === Number(k));
       if (target) { keepOne([cur.g], () => target.id); list.redraw(); updateSel(); }
     } else if (cur && k === 'a') { applyQuick([cur.g], 'mine'); list.redraw(); updateSel(); }
     else if (cur && k === 'u') { keepAll([cur.g]); list.redraw(); updateSel(); }
-    else if (cur && k === 'n') { await toggleDismiss(cur.g); render(); }
+    else if (cur && k === 'i') { await toggleDismiss(cur.g); render(); }
   });
   updateSel();
   const empty = () => { if (!rows.length) scroller.innerHTML = '<div class="empty"><h2>Nothing here</h2><p>No group matches these filters.</p></div>'; };
@@ -1330,119 +1499,97 @@ function renderDupes(main) {
     empty();
     updateSel();
   };
-  wireFilterBar(main, st.f, dupBase, refilter);
-  main.querySelectorAll('[data-gkind]').forEach((b) => (b.onclick = () => { st.kinds.has(b.dataset.gkind) ? st.kinds.delete(b.dataset.gkind) : st.kinds.add(b.dataset.gkind); b.classList.toggle('on'); refilter(); }));
-  main.querySelectorAll('[data-show]').forEach((b) => (b.onclick = () => { st.show = b.dataset.show; main.querySelectorAll('[data-show]').forEach((x) => x.classList.toggle('on', x === b)); refilter(); }));
-  const ns = $('#notSure', main);
-  if (ns) ns.onclick = () => {
-    st.notSure = !st.notSure;
-    if (!st.notSure) for (const k of Object.keys(GROUP)) if (!GROUP[k].main) st.kinds.delete(k);
-    render();
-  };
-  const sd = $('#showDismissed', main);
-  if (sd) sd.onclick = () => { st.showDismissed = !st.showDismissed; render(); };
+  wireTopbar(main, F, dupBase, refilter, 'Changed');
+
+  // Which kinds of group, and the ways to look at the groups.
+  const kindPanel = (b) => openPanel(b, 340, (pop) => {
+    const mainKinds = Object.keys(GROUP).filter((k) => GROUP[k].main);
+    const sureKinds = Object.keys(GROUP).filter((k) => !GROUP[k].main);
+    const row = (k) => `<label class="popi" title="${esc(GROUP[k].tip)}"><input type="checkbox" class="check" data-gkind="${k}" ${st.kinds.has(k) ? 'checked' : ''}><span class="p">${GROUP[k].label}</span><span class="n">${nf.format(counts[k] || 0)}</span></label>`;
+    pop.innerHTML = `<div class="popl"><div class="pophead">Duplicates</div>${mainKinds.map(row).join('')}<div class="pophead">Not sure</div>${sureKinds.map(row).join('')}
+      <label class="popi"><input type="checkbox" class="check" id="notSure" ${st.notSure ? 'checked' : ''}><span class="p">Show the not sure groups</span><span class="n">${nf.format(notSureCount)}</span></label></div>
+      <div class="popf"><button class="linkbtn quiet" data-none>Clear</button><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+    const sync = () => { b.classList.toggle('on', st.kinds.size > 0 || st.notSure); refilter(); };
+    pop.querySelectorAll('[data-gkind]').forEach((c) => (c.onchange = () => { c.checked ? st.kinds.add(c.dataset.gkind) : st.kinds.delete(c.dataset.gkind); sync(); }));
+    $('#notSure', pop).onchange = (e) => {
+      st.notSure = e.target.checked;
+      if (!st.notSure) for (const k of Object.keys(GROUP)) if (!GROUP[k].main) st.kinds.delete(k);
+      kindPanel(b);
+      sync();
+    };
+    $('[data-none]', pop).onclick = () => { st.kinds.clear(); st.notSure = false; kindPanel(b); sync(); };
+    $('[data-done]', pop).onclick = closePopover;
+  });
+  $('#certPop', main).onclick = (e) => { e.stopPropagation(); kindPanel(e.currentTarget); };
+  const viewPanel = (b) => openPanel(b, 420, (pop) => {
+    const ign = r.groups.filter((g) => S.ignored.has(g.key));
+    pop.innerHTML = `<div class="popl"><div class="pophead">Show</div>
+      ${SHOW_STATES.map(([k, l]) => `<label class="popi"><input type="radio" name="show" class="check radio" value="${k}" ${st.show === k ? 'checked' : ''}><span class="p">${l}</span></label>`).join('')}
+      <div class="pophead">More</div>
+      <label class="popi"><input type="checkbox" class="check" id="hideSingles" ${st.hideSingles ? 'checked' : ''}><span class="p">Hide groups left with one file</span></label>
+      <label class="popi"><input type="checkbox" class="check" id="showIgn" ${st.showDismissed ? 'checked' : ''}><span class="p">Show the groups I ignored</span><span class="n">${ign.length}</span></label>
+      ${ign.length ? `<div class="pophead">Ignored groups <button class="linkbtn" id="unignoreAll">Bring all back</button></div>${ign.slice(0, 50).map((g, i) => `<div class="popi"><span class="p" title="${esc(g.label)}">${esc(GROUP[g.kind].label)} · ${esc(g.label)}</span><button class="linkbtn" data-unign="${i}">Bring back</button></div>`).join('')}${ign.length > 50 ? `<div class="empty-list">and ${ign.length - 50} more</div>` : ''}` : ''}</div>
+      <div class="popf"><span class="grow"></span><button class="btn small" data-done>Done</button></div>`;
+    const sync = () => { b.classList.toggle('on', viewOn()); refilter(); };
+    pop.querySelectorAll('[name=show]').forEach((c) => (c.onchange = () => { st.show = c.value; sync(); }));
+    $('#hideSingles', pop).onchange = (e) => { st.hideSingles = e.target.checked; sync(); };
+    $('#showIgn', pop).onchange = (e) => { st.showDismissed = e.target.checked; sync(); };
+    pop.querySelectorAll('[data-unign]').forEach((c) => (c.onclick = () => { S.ignored.delete(ign[Number(c.dataset.unign)].key); queueSave(); viewPanel(b); sync(); }));
+    const ua = $('#unignoreAll', pop);
+    if (ua) ua.onclick = () => { for (const g of ign) S.ignored.delete(g.key); queueSave(); viewPanel(b); sync(); };
+    $('[data-done]', pop).onclick = closePopover;
+  });
+  $('#viewPop', main).onclick = (e) => { e.stopPropagation(); viewPanel(e.currentTarget); };
+
   $('#gsort', main).onchange = (e) => { st.gsort = e.target.value; refilter(); };
+  $('#recheck', main).onclick = () => recheckFiles();
   $('#editRules', main).onclick = () => openRules(() => { applyQuick(groups, 'mine'); render(); toast(`Kept one file by your rules in ${nf.format(groups.length)} groups; the rest is selected.`); });
   $('#keysBtn', main).onclick = () => { st.keys = !st.keys; $('#keyhelp', main).hidden = !st.keys; scroller.focus(); };
   main.querySelectorAll('[data-allrule]').forEach((b) => (b.onclick = () => {
     applyQuick(groups, b.dataset.allrule);
     list.redraw(); updateSel();
-    toast(`In ${nf.format(groups.length)} groups one file stays (${esc(QUICK[b.dataset.allrule].label)}); the rest is selected.`);
+    toast(`In ${nf.format(groups.length)} groups one shown file stays (${esc(QUICK[b.dataset.allrule].label)}); the other shown files are selected.`);
   }));
   $('#keepAllShown', main).onclick = () => { keepAll(groups); list.redraw(); updateSel(); };
-}
-
-// ---------- Recycle ----------
-
-function reasonFor(kind, id) {
-  if (kind === 'old') {
-    const o = S.result.old.find((x) => x.file === id);
-    return o ? o.signals.map((s) => REASON[s.type].text(s)).join(', ') : 'Old download';
-  }
-  const g = S.result.groups.find((x) => x.files.includes(id));
-  if (!g) return 'Duplicate';
-  const keepF = S.files.get(g.suggested);
-  return `${GROUP[g.kind].label}${keepF && keepF.id !== id ? ' as ' + keepF.path : ''}`;
-}
-
-// What is selected in both lists, each file once. A file picked in Duplicates counts as one.
-function selectedForAct() {
-  const out = new Map();
-  for (const [kind, st] of [['dupes', S.dupes], ['old', S.old]]) {
-    for (const id of st.sel) if (S.files.has(id) && !S.files.get(id).kept && !out.has(id)) out.set(id, kind);
-  }
-  return [...out.entries()].map(([id, kind]) => ({ id, kind }));
-}
-
-function confirmRecycle() {
-  const entries = selectedForAct();
-  const ids = entries.map((e) => e.id);
-  if (!ids.length) return;
-  const bytes = ids.reduce((a, id) => a + S.files.get(id).size, 0);
-  // Duplicates are delicate: say so when every file of a group would go, from either list.
-  const picked = new Set(ids);
-  const whole = S.result.groups.filter((g) => g.files.length >= 2 && g.files.every((id) => picked.has(id)));
-  const d = $('#confirm');
-  const shown = ids;
-  d.innerHTML = `<div class="dh"><h2>Move ${nf.format(ids.length)} file${ids.length === 1 ? '' : 's'} to the Recycle Bin?</h2>
-      <p>${size(bytes)}. You can put them back from History or from the Recycle Bin.</p></div>
-    ${whole.length ? `<div class="warnbox">In ${whole.length} duplicate group${whole.length === 1 ? '' : 's'} every file is selected, so none of that file stays: ${whole.slice(0, 3).map((g) => '“' + esc(g.label) + '”').join(', ')}${whole.length > 3 ? '…' : ''}</div>` : ''}
-    <div class="dl">${shown.map((id) => { const f = S.files.get(id); return `<div><span class="n" title="${esc(f.path)}">${esc(f.path)}</span><span class="s">${size(f.size)}</span></div>`; }).join('')}
-</div>
-    <div class="df"><button class="btn" id="dCancel">Cancel</button><button class="btn danger" id="dGo">Move to Recycle Bin</button></div>`;
-  d.showModal();
-  $('#dCancel', d).focus();
-  $('#dCancel', d).onclick = () => d.close();
-  $('#dGo', d).onclick = async () => {
-    $('#dGo', d).disabled = true;
-    $('#dGo', d).textContent = 'Moving…';
-    try {
-      const items = entries.map((e) => ({ path: S.files.get(e.id).path, reason: reasonFor(e.kind, e.id) }));
-      const out = await invoke('recycle', { jobId: S.jobId, items });
-      d.close();
-      await flushState();
-      await reloadJob(S.jobId);
-      await loadOverview();
-      render();
-      const movedSet = new Set(out.moved.map((p) => p.toLowerCase()));
-      const removalIds = S.overview.removals.filter((x) => !x.restoredAt && movedSet.has(x.path.toLowerCase())).map((x) => x.id);
-      const msg = `${nf.format(out.moved.length)} moved to the Recycle Bin.` + (out.failed.length ? ` ${out.failed.length} could not be moved: ${esc(out.failed[0].error)}` : '');
-      toast(msg, out.moved.length && S.overview.canPutBack ? { label: 'Undo', run: () => putBack(removalIds) } : null);
-    } catch (e) {
-      d.close();
-      fail(e);
-    }
+  $('#acceptSure', main).onclick = () => {
+    const sure = groups.filter((g) => GROUP[g.kind].main);
+    keepOne(sure, (g, ids) => pickByRules(g, ['suggested'], ids));
+    list.redraw(); updateSel();
+    toast(`Sift’s pick stays in ${nf.format(sure.length)} sure group${sure.length === 1 ? '' : 's'}; the other shown files are selected.`);
   };
-}
-
-async function putBack(ids) {
-  let ok = 0, bad = [];
-  for (const id of ids) {
-    try { await invoke('put_back', { id }); ok++; } catch (e) { bad.push(String(e)); }
-  }
-  await loadOverview();
-  render();
-  toast(`${nf.format(ok)} put back.` + (bad.length ? ` ${bad.length} could not: ${esc(bad[0])}` : '') + (ok ? ' Scan again to see them in the lists.' : ''));
-}
-
-// ---------- History ----------
-
-function renderHistory(main) {
-  const o = S.overview;
-  const rem = o.removals;
-  const freed = rem.filter((x) => !x.restoredAt).reduce((a, x) => a + x.size, 0);
-  main.innerHTML = header('History', `${nf.format(rem.length)} files moved to the Recycle Bin · ${size(freed)}`) + `<div class="page">
-    <div class="card"><h2>Moved to the Recycle Bin</h2><p class="hint">Newest first. Put back returns a file to where it was, as long as it is still in the Recycle Bin.</p>
-      <div class="list">${rem.length ? rem.slice(0, 1000).map((x) => `<div class="li">
-        <span class="p" title="${esc(x.path)}\n${esc(x.reason)}">${esc(x.path)}</span>
-        <span class="m" title="${esc(fullDate(x.at))}">${size(x.size)} · ${ago(x.at)}</span>
-        ${x.restoredAt ? '<span class="tag">put back</span>' : o.canPutBack ? `<button class="linkbtn" data-back="${x.id}">Put back</button>` : ''}</div>`).join('') : '<div class="empty-list">Nothing moved yet.</div>'}</div></div>
-    <div class="card"><h2>Scans</h2>
-      <div class="list">${o.scans.length ? o.scans.map((s) => `<div class="li">
-        <span class="p" title="${esc(s.folders)}">${esc(fullDate(s.startedAt))}${s.cancelled ? ' <span class="tag">stopped</span>' : ''}</span>
-        <span class="m">${nf.format(s.filesSeen)} files · ${size(s.bytesSeen)} · ${nf.format(s.oldCount)} old · ${nf.format(s.groupCount)} duplicate groups</span></div>`).join('') : '<div class="empty-list">No scans yet.</div>'}</div></div>
-  </div>`;
-  main.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => putBack([Number(b.dataset.back)])));
+  const byQuery = (keepThem) => {
+    const qt = searchTest(F.query);
+    if (!qt) { toast('Type something in the search box first.'); return; }
+    let done = 0, skipped = 0;
+    for (const g of groups) {
+      const ids = visOf(g);
+      const hit = ids.filter((id) => qt(S.files.get(id).path));
+      if (!hit.length) continue;
+      if (!keepThem && hit.length === ids.length) { skipped++; continue; }
+      markReviewed(g);
+      for (const id of ids) {
+        const f = S.files.get(id);
+        if (!canSelect(f)) continue;
+        const matches = hit.includes(id);
+        if (keepThem) matches ? st.sel.delete(id) : st.sel.add(id);
+        else if (matches) st.sel.add(id);
+      }
+      done++;
+    }
+    list.redraw(); updateSel();
+    toast(`${keepThem ? 'Kept the matching files' : 'Selected the matching files'} in ${nf.format(done)} group${done === 1 ? '' : 's'}.${skipped ? ` ${skipped} left alone: every file in them matches.` : ''}`);
+  };
+  $('#keepMatching', main).onclick = () => byQuery(true);
+  $('#removeMatching', main).onclick = () => byQuery(false);
+  $('#ignoreShown', main).onclick = () => {
+    const gs = groups.filter((g) => !S.ignored.has(g.key));
+    if (!gs.length) return;
+    for (const g of gs) { S.ignored.add(g.key); for (const id of g.files) st.sel.delete(id); }
+    queueSave();
+    render();
+    toast(`${nf.format(gs.length)} group${gs.length === 1 ? '' : 's'} ignored for this job.`, { label: 'Undo', run: () => { for (const g of gs) S.ignored.delete(g.key); queueSave(); render(); } });
+  };
+  $('#nextUnrev', main).onclick = () => nextUnreviewed();
 }
 
 // ---------- Set up ----------
@@ -1803,42 +1950,349 @@ function renderSetup(main) {
   wireSettings();
 }
 
+// What is selected in both lists, each file once. A file picked in Duplicates counts as one.
+function selectedForAct() {
+  const out = new Map();
+  for (const [kind, st] of [['dupes', S.dupes], ['old', S.old]]) {
+    for (const id of st.sel) if (S.files.has(id) && !S.files.get(id).kept && !out.has(id)) out.set(id, kind);
+  }
+  return [...out.entries()].map(([id, kind]) => ({ id, kind }));
+}
+
 // ---------- Act ----------
 
-const ACT_COLS = [
-  { label: 'Name', w: 300 },
-  { label: 'Folder', w: 340 },
-  { label: 'Size', w: 90, num: true },
-  { label: 'From list', w: 120 },
+const STRATEGIES = [['leave', 'Leave alone'], ['selected', 'As I selected'], ['folderOrder', 'Keep by folder order'], ['newest', 'Keep newest'], ['oldest', 'Keep oldest'], ['largest', 'Keep largest']];
+const LEVELS = [
+  { key: 'sure', label: 'Sure duplicates', desc: 'Copies and installer versions', opts: STRATEGIES, dupes: true, main: true },
+  { key: 'notSure', label: 'Not sure', desc: 'Same content under other names, same name, similar names', opts: STRATEGIES, dupes: true, main: false },
+  { key: 'old', label: 'Old downloads', desc: 'Files that look like leftovers', opts: STRATEGIES.slice(0, 2), dupes: false },
+];
+
+// What the filters show, on both lists: the files Act may touch.
+function actScope() {
+  const gs = groupsShown(true);
+  const items = oldItems(true);
+  return { gs, items };
+}
+
+function actBase() {
+  const m = new Map();
+  for (const f of dupBase()) m.set(f.id, f);
+  for (const f of oldBase()) m.set(f.id, f);
+  return [...m.values()];
+}
+
+function actRequest(scope) {
+  const A = S.act;
+  const st = S.dupes;
+  const locked = [];
+  for (const f of S.files.values()) if (isProtected(f)) locked.push(f.id);
+  return {
+    sure: A.sure,
+    notSure: A.notSure,
+    old: A.old,
+    removal: A.removal === 'move' ? { type: 'move', to: A.moveTo, keepStructure: A.keepStructure } : { type: A.removal },
+    moveKept: A.moveKept ? A.moveKeptTo : null,
+    renameKept: A.renameKept,
+    shownGroups: scope.gs.map((g) => ({ key: g.key, files: visOf(g) })),
+    shownOld: scope.items.map((o) => o.file),
+    selectedDupes: [...st.sel],
+    selectedOld: [...S.old.sel],
+    locked,
+  };
+}
+
+// Choices that are missing something say so before anything is asked of the app.
+function actProblem() {
+  const A = S.act;
+  if (A.removal === 'move' && !A.moveTo) return 'Choose the folder the files that go are moved to.';
+  if (A.moveKept && !A.moveKeptTo) return 'Choose the folder the kept files are moved to.';
+  return null;
+}
+
+const baseName = (p) => p.split(/[\\/]/).pop();
+const dirName = (p) => p.slice(0, Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/')));
+
+function fateText(it, skips) {
+  if (it.fate === 'recycle') return 'Recycle Bin';
+  if (it.fate === 'delete') return 'Deleted for good';
+  if (it.fate === 'move') return `Moved to ${it.movedTo}`;
+  let t = 'Stays';
+  if (it.movedTo) t += ` · moved to ${dirName(it.movedTo)}`;
+  if (it.renamedTo) t += ` · renamed to ${baseName(it.renamedTo)}`;
+  const sk = skips.get(it.id);
+  if (sk) t += ` · not renamed: ${sk}`;
+  return t;
+}
+
+const ACT_COLS = (last) => [
+  { label: 'Name', w: 240 },
+  { label: 'Folder', w: 240 },
+  { label: 'Size', w: 76, num: true },
+  { label: 'Modified', w: 92 },
+  { label: 'Created', w: 92 },
+  { label: 'Type', w: 120 },
+  { label: 'From', w: 120 },
+  { label: last, w: 260 },
 ];
 
 function renderAct(main) {
   if (!S.result) return noResult(main, 'Act');
-  const entries = selectedForAct();
-  const bytes = entries.reduce((a, e) => a + S.files.get(e.id).size, 0);
-  if (!entries.length) {
-    main.innerHTML = header('Act', 'Nothing is removed until you say so.') + `<div class="page"><div class="empty"><h2>Nothing selected</h2>
-      <p>Pick the files to remove on Results. They show up here for a last look before they go to the Recycle Bin.</p>
-      <button class="btn primary" id="toResults">Go to Results</button></div></div>`;
-    $('#toResults', main).onclick = () => setStep('results');
-    return;
-  }
-  const nOld = entries.filter((e) => e.kind === 'old').length;
-  main.innerHTML = header('Act', `${nf.format(entries.length)} file${entries.length === 1 ? '' : 's'} to move to the Recycle Bin · ${size(bytes)}`) + `
-    <div class="table" id="table">
-      <div class="thead">${headCells(ACT_COLS, {})}</div>
-      <div class="scroller" id="list" tabindex="0"></div>
+  const j = job();
+  const A = S.act;
+  const F = S.f;
+  const r = S.result;
+  const actions = `<button class="btn toggle ${A.dry ? 'on' : ''}" id="dryRun" aria-pressed="${A.dry}" title="List what would happen to every file, without doing it">Dry run</button><button class="btn danger" id="goBtn" title="Do what the dry run lists">Go…</button>`;
+  const levelRow = (L) => `<div class="level" data-level="${L.key}"><div><b>${L.label}</b><span class="muted"> ${L.desc}</span><div class="muted lstat" id="lstat-${L.key}"></div></div>
+      <select class="btn" data-strategy="${L.key}" aria-label="${L.label}">${L.opts.map(([k, l]) => `<option value="${k}" ${A[L.key] === k ? 'selected' : ''}>${l}</option>`).join('')}</select></div>`;
+  const levels = LEVELS.filter((L) => (L.dupes ? j.findDupes : j.findOld)).map(levelRow).join('');
+  main.innerHTML = header('Act', 'Nothing happens until you press Go.', '<button class="btn" id="backToResults">‹ Results</button>') +
+    topbarHtml(F, '', actions) + `
+    <div class="actpanel">
+      <section><h3>What to do, per certainty</h3>${levels}</section>
+      <section><h3>The files that go</h3>
+        <label class="tgl"><input type="radio" class="check radio" name="removal" value="recycle" ${A.removal === 'recycle' ? 'checked' : ''}>Recycle Bin <span class="muted">(you can put them back)</span></label>
+        <div><label class="tgl"><input type="radio" class="check radio" name="removal" value="move" ${A.removal === 'move' ? 'checked' : ''}>Move to a folder</label>
+          <div class="sub2" ${A.removal === 'move' ? '' : 'hidden'}><button class="btn small" id="pickMove">Choose folder…</button><span class="p muted" id="moveTo" title="${esc(A.moveTo)}">${esc(A.moveTo || 'No folder chosen')}</span>
+            <label class="tgl small"><input type="checkbox" class="check" id="keepStructure" ${A.keepStructure ? 'checked' : ''}>Keep the folder structure</label></div></div>
+        <div><label class="tgl"><input type="radio" class="check radio" name="removal" value="delete" ${A.removal === 'delete' ? 'checked' : ''}>Delete permanently</label>
+          <div class="sub2 dangertext" ${A.removal === 'delete' ? '' : 'hidden'}>They do not go to the Recycle Bin and can’t be put back. Sift asks once more before it does it.</div></div>
+      </section>
+      <section><h3>The file that stays <span class="muted">(optional)</span></h3>
+        <div><label class="tgl"><input type="checkbox" class="check" id="moveKept" ${A.moveKept ? 'checked' : ''}>Move it to a folder</label>
+          <div class="sub2" ${A.moveKept ? '' : 'hidden'}><button class="btn small" id="pickKept">Choose folder…</button><span class="p muted" id="keptTo" title="${esc(A.moveKeptTo)}">${esc(A.moveKeptTo || 'No folder chosen')}</span></div></div>
+        <label class="tgl" title="Drops “(1)”, “ - Copy” or a trailing number from its name, when no file with the clean name is left in that folder"><input type="checkbox" class="check" id="renameKept" ${A.renameKept ? 'checked' : ''}>Rename it to its clean name</label>
+        <div class="muted hint2">“report (1).pdf” becomes “report.pdf”, when no “report.pdf” is left in that folder.</div>
+      </section>
     </div>
-    <div class="selbar"><div class="what">${nf.format(entries.length)} selected <span>· ${size(bytes)} · ${nf.format(entries.length - nOld)} duplicates, ${nf.format(nOld)} old downloads</span></div><div class="grow"></div>
-      <button class="btn" id="backToResults">Back to Results</button>
-      <button class="btn danger" id="goRecycle">Move to Recycle Bin…</button></div>`;
-  columns($('#table', main), 'act', ACT_COLS);
-  virtualList($('#list', main), entries.length, (i) => {
-    const f = S.files.get(entries[i].id);
-    return { cls: '', html: `<div class="name" title="${esc(f.name)}">${esc(f.name)}</div><div class="muted" title="${esc(f.dir)}">${esc(f.dir)}</div><div class="num">${size(f.size)}</div><div class="muted">${entries[i].kind === 'old' ? 'Old downloads' : 'Duplicates'}</div>` };
-  });
+    <div class="actsum" id="actsum"></div>
+    <div class="table" id="table"></div>`;
+
+  let scope = actScope();
+  let seq = 0;
+  const redrawNow = async () => {
+    const mine = ++seq;
+    scope = actScope();
+    const hidden = r.groups.length - scope.gs.length;
+    $('#counts', main).textContent = `${nf.format(scope.gs.length)} of ${nf.format(r.groups.length)} groups shown${hidden ? ` · ${nf.format(hidden)} hidden, left alone` : ''} · ${nf.format(scope.items.length)} of ${nf.format(r.old.length)} old files shown`;
+    for (const L of LEVELS) {
+      const el = $('#lstat-' + L.key, main);
+      if (!el) continue;
+      if (L.dupes) {
+        const gs = scope.gs.filter((g) => !!GROUP[g.kind].main === L.main);
+        const n = gs.reduce((a, g) => a + visOf(g).filter((id) => S.dupes.sel.has(id)).length, 0);
+        el.textContent = `${nf.format(gs.length)} group${gs.length === 1 ? '' : 's'} shown · ${nf.format(n)} file${n === 1 ? '' : 's'} selected`;
+      } else {
+        const n = scope.items.filter((o) => S.old.sel.has(o.file)).length;
+        el.textContent = `${nf.format(scope.items.length)} file${scope.items.length === 1 ? '' : 's'} shown · ${nf.format(n)} selected`;
+      }
+    }
+    if (A.dry) {
+      const problem = actProblem();
+      if (problem) { A.plan = null; drawTable(problem); return; }
+      try {
+        const plan = await invoke('plan_act', { jobId: S.jobId, req: actRequest(scope) });
+        if (mine !== seq) return;
+        A.plan = plan;
+      } catch (e) { fail(e); A.plan = null; }
+    }
+    drawTable();
+  };
+  let timer = null;
+  const redraw = () => { clearTimeout(timer); timer = setTimeout(redrawNow, 60); };
+
+  const drawTable = (problem) => {
+    const tbl = $('#table', main);
+    const sum = $('#actsum', main);
+    let defs, rowsOf, rowHtml;
+    if (A.dry) {
+      const p = A.plan;
+      if (!p) {
+        sum.innerHTML = problem ? `<span class="dangertext">${esc(problem)}</span>` : '';
+        tbl.innerHTML = '<div class="empty"><h2>Dry run</h2><p>' + esc(problem || 'Working it out…') + '</p></div>';
+        return;
+      }
+      const t = p.totals;
+      const skips = new Map(p.skipped.map((s) => [s.id, s.reason]));
+      const bits = [`<b>${nf.format(t.go)}</b> file${t.go === 1 ? '' : 's'} go · ${size(t.goBytes)}`, `${nf.format(t.stay)} stay`];
+      if (t.keptMoved) bits.push(`${nf.format(t.keptMoved)} kept moved`);
+      if (t.renamed) bits.push(`${nf.format(t.renamed)} renamed`);
+      if (p.skipped.length) bits.push(`${nf.format(p.skipped.length)} not renamed (name taken)`);
+      if (p.undecided) bits.push(`${nf.format(p.undecided)} group${p.undecided === 1 ? '' : 's'} left alone: folder order can’t tell`);
+      sum.innerHTML = `${bits.join(' · ')}` + (p.wiped.length ? `<div class="warnbox">In ${p.wiped.length} duplicate group${p.wiped.length === 1 ? '' : 's'} every file would go, so none of that file stays: ${p.wiped.slice(0, 3).map((l) => '“' + esc(l) + '”').join(', ')}${p.wiped.length > 3 ? '…' : ''}</div>` : '');
+      // Files of one group sit together; old downloads come last.
+      const order = new Map();
+      for (const it of p.items) { const k = it.group ?? '￿'; if (!order.has(k)) order.set(k, order.size); }
+      const items = p.items.slice().sort((a, b) => order.get(a.group ?? '￿') - order.get(b.group ?? '￿'));
+      defs = ACT_COLS('What happens');
+      rowsOf = items;
+      rowHtml = (i) => {
+        const it = items[i];
+        const f = S.files.get(it.id);
+        const stays = it.fate === 'stays';
+        return { cls: `member ${stays ? 'stays' : ''}`, html: `${actCells(f)}<div class="fate ${it.fate}" title="${esc(it.group || '')}">${esc(fateText(it, skips))}</div>` };
+      };
+    } else {
+      const ids = new Map();
+      for (const g of scope.gs) for (const id of visOf(g)) if (S.dupes.sel.has(id) && !ids.has(id)) ids.set(id, `${GROUP[g.kind].label}: ${g.label}`);
+      for (const o of scope.items) if (S.old.sel.has(o.file) && !ids.has(o.file)) ids.set(o.file, 'Old: ' + o.signals.map((s) => REASON[s.type].text(s)).join(', '));
+      const list = [...ids.entries()];
+      const bytes = list.reduce((a, [id]) => a + S.files.get(id).size, 0);
+      sum.innerHTML = `${nf.format(list.length)} file${list.length === 1 ? '' : 's'} selected on Results and shown here · ${size(bytes)}. Press <b>Dry run</b> to see what each choice would do to every file.`;
+      defs = ACT_COLS('Selected as');
+      rowsOf = list;
+      rowHtml = (i) => ({ cls: '', html: `${actCells(S.files.get(list[i][0]))}<div class="muted" title="${esc(list[i][1])}">${esc(list[i][1])}</div>` });
+    }
+    tbl.innerHTML = `<div class="thead">${headCells(defs, {})}</div><div class="scroller" id="list" tabindex="0"></div>`;
+    columns(tbl, A.dry ? 'actdry' : 'act', defs);
+    const sc = $('#list', tbl);
+    if (!rowsOf.length) sc.innerHTML = `<div class="empty"><h2>${A.dry ? 'Nothing would happen' : 'Nothing selected here'}</h2><p>${A.dry ? 'With these choices and filters no file is touched.' : 'Pick files on Results, or choose a way of keeping one file per group above.'}</p></div>`;
+    else virtualList(sc, rowsOf.length, rowHtml);
+  };
+  const actCells = (f) => `<div class="name" title="${esc(f.path)}">${esc(f.name)}</div>${folderPlain(f)}<div class="num">${size(f.size)}</div>${dateCell(f.modified)}${dateCell(f.created)}${typeCell(f)}${originCell(f)}`;
+  const folderPlain = (f) => `<div class="muted" title="${esc(f.dir)}">${esc(f.dir)}</div>`;
+
+  // The bar.
+  wireTopbar(main, F, actBase, () => {
+    // Only what passes the filters stays selected, so nothing hidden can go along unseen.
+    const shown = new Set();
+    for (const g of groupsShown(true)) for (const id of visOf(g)) shown.add(id);
+    for (const id of [...S.dupes.sel]) if (!shown.has(id)) S.dupes.sel.delete(id);
+    const old = new Set(oldItems(true).map((o) => o.file));
+    for (const id of [...S.old.sel]) if (!old.has(id)) S.old.sel.delete(id);
+    selectionChanged();
+    redraw();
+  }, 'Date');
   $('#backToResults', main).onclick = () => setStep('results');
-  $('#goRecycle', main).onclick = () => confirmRecycle();
+  $('#dryRun', main).onclick = (e) => {
+    A.dry = !A.dry;
+    A.plan = null;
+    e.currentTarget.classList.toggle('on', A.dry);
+    e.currentTarget.setAttribute('aria-pressed', A.dry);
+    redraw();
+  };
+  main.querySelectorAll('[data-strategy]').forEach((s) => (s.onchange = () => { A[s.dataset.strategy] = s.value; redraw(); }));
+  main.querySelectorAll('[name=removal]').forEach((c) => (c.onchange = () => {
+    A.removal = c.value;
+    main.querySelectorAll('.actpanel section:nth-child(2) .sub2').forEach((x, i) => { x.hidden = (i === 0 ? 'move' : 'delete') !== A.removal; });
+    redraw();
+  }));
+  const pick = async (key, labelId) => {
+    const p = await invoke('pick_folder').catch(fail);
+    if (!p) return;
+    A[key] = p;
+    $('#' + labelId, main).textContent = p;
+    $('#' + labelId, main).title = p;
+    redraw();
+  };
+  $('#pickMove', main).onclick = () => pick('moveTo', 'moveTo');
+  $('#pickKept', main).onclick = () => pick('moveKeptTo', 'keptTo');
+  $('#keepStructure', main).onchange = (e) => { A.keepStructure = e.target.checked; redraw(); };
+  $('#moveKept', main).onchange = (e) => {
+    A.moveKept = e.target.checked;
+    e.target.closest('div').querySelector('.sub2').hidden = !A.moveKept;
+    redraw();
+  };
+  $('#renameKept', main).onchange = (e) => { A.renameKept = e.target.checked; redraw(); };
+  $('#goBtn', main).onclick = () => goAct(scope);
+  redrawNow();
+}
+
+const OP_LABEL = { recycle: 'Recycle', move: 'Move', rename: 'Rename', delete: 'Delete' };
+
+// Works out the plan afresh, shows every step for a last look, and does it.
+async function goAct(scope) {
+  const A = S.act;
+  const problem = actProblem();
+  if (problem) { toast(problem); return; }
+  let plan;
+  try { plan = await invoke('plan_act', { jobId: S.jobId, req: actRequest(scope) }); } catch (e) { fail(e); return; }
+  if (!plan.ops.length) { toast('With these choices nothing would happen.'); return; }
+  const permanent = A.removal === 'delete' && plan.totals.go > 0;
+  const t = plan.totals;
+  const parts = [];
+  if (t.go) parts.push(A.removal === 'recycle' ? `${nf.format(t.go)} to the Recycle Bin` : A.removal === 'move' ? `${nf.format(t.go)} moved to ${A.moveTo}` : `${nf.format(t.go)} deleted for good`);
+  if (t.keptMoved) parts.push(`${nf.format(t.keptMoved)} kept file${t.keptMoved === 1 ? '' : 's'} moved`);
+  if (t.renamed) parts.push(`${nf.format(t.renamed)} renamed`);
+  const d = $('#confirm');
+  d.innerHTML = `<div class="dh"><h2>${permanent ? `Delete ${nf.format(t.go)} file${t.go === 1 ? '' : 's'} for good?` : 'Do this?'}</h2>
+      <p>${parts.join(' · ')}${t.go ? ` · ${size(t.goBytes)}` : ''}. ${permanent ? 'Deleted files do not go to the Recycle Bin.' : 'Every step is written in History, where it can be undone.'}</p></div>
+    ${plan.wiped.length ? `<div class="warnbox">In ${plan.wiped.length} duplicate group${plan.wiped.length === 1 ? '' : 's'} every file goes, so none of that file stays: ${plan.wiped.slice(0, 3).map((l) => '“' + esc(l) + '”').join(', ')}${plan.wiped.length > 3 ? '…' : ''}</div>` : ''}
+    ${plan.skipped.length ? `<div class="warnbox">${plan.skipped.length} kept file${plan.skipped.length === 1 ? '' : 's'} will not be renamed because the clean name is taken: ${plan.skipped.slice(0, 3).map((s) => '“' + esc(baseName(s.path)) + '”').join(', ')}${plan.skipped.length > 3 ? '…' : ''}</div>` : ''}
+    <div class="dl">${plan.ops.map((o) => `<div><span class="k">${OP_LABEL[o.kind]}</span><span class="n" title="${esc(o.from)}${o.to ? '\n→ ' + esc(o.to) : ''}">${esc(o.from)}${o.to ? ' → ' + esc(o.to) : ''}</span><span class="s">${size(S.files.get(o.id)?.size || 0)}</span></div>`).join('')}</div>
+    <div class="df"><button class="btn" id="dCancel">Cancel</button><button class="btn ${permanent ? 'danger' : 'primary'}" id="dGo">${permanent ? 'Delete…' : 'Go'}</button></div>`;
+  d.onclose = null;
+  d.showModal();
+  $('#dCancel', d).focus();
+  $('#dCancel', d).onclick = () => d.close();
+  const goBtn = $('#dGo', d);
+  goBtn.onclick = async () => {
+    let confirmed = false;
+    if (permanent) {
+      // The same dialog asks again, so the first question is never answered by a close event.
+      if (!await askOnce(`Delete ${nf.format(t.go)} file${t.go === 1 ? '' : 's'} for good?`, 'This can’t be undone. The files will not go to the Recycle Bin, and Sift cannot put them back.', 'Delete for good')) return;
+      confirmed = true;
+    }
+    goBtn.disabled = true;
+    goBtn.textContent = 'Working…';
+    try {
+      const before = Math.max(0, ...S.overview.removals.map((x) => x.id));
+      const out = await invoke('act', { jobId: S.jobId, req: actRequest(scope), confirmedDelete: confirmed });
+      d.close();
+      await flushState();
+      await reloadJob(S.jobId);
+      await loadOverview();
+      A.plan = null;
+      A.dry = false;
+      render();
+      const done = [['recycled', out.recycled], ['moved', out.moved], ['renamed', out.renamed], ['deleted', out.deleted]].filter(([, n]) => n).map(([w, n]) => `${nf.format(n)} ${w}`);
+      const undoable = S.overview.removals.filter((x) => x.id > before && !x.restoredAt && x.kind !== 'deleted' && (x.kind !== 'recycled' || S.overview.canPutBack));
+      toast((done.join(', ') || 'Nothing done') + '.' + (out.failed.length ? ` ${out.failed.length} could not be done: ${esc(out.failed[0].error)}` : ''), undoable.length ? { label: 'Undo', run: () => undoEntries(undoable.map((x) => x.id)) } : null);
+    } catch (e) {
+      d.close();
+      fail(e);
+    }
+  };
+}
+
+// Undoes History entries, the newest first (a rename before the move it followed).
+async function undoEntries(ids) {
+  let ok = 0, bad = [];
+  for (const id of ids.slice().sort((a, b) => b - a)) {
+    try { await invoke('undo', { id }); ok++; } catch (e) { bad.push(String(e)); }
+  }
+  await loadOverview();
+  render();
+  toast(`${nf.format(ok)} undone.` + (bad.length ? ` ${bad.length} could not: ${esc(bad[0])}` : '') + (ok ? ' Scan again to see the files in the lists.' : ''));
+}
+
+// ---------- History ----------
+
+const KIND_TEXT = { recycled: 'Recycle Bin', moved: 'Moved', renamed: 'Renamed', deleted: 'Deleted for good' };
+const UNDO_TEXT = { recycled: 'Put back', moved: 'Move back', renamed: 'Rename back' };
+
+function renderHistory(main) {
+  const o = S.overview;
+  const rem = o.removals;
+  const freed = rem.filter((x) => !x.restoredAt && (x.kind === 'recycled' || x.kind === 'deleted')).reduce((a, x) => a + x.size, 0);
+  const entry = (x) => {
+    const where = x.to ? ` → ${x.to}` : '';
+    const undo = x.restoredAt ? '<span class="tag">undone</span>'
+      : x.kind === 'deleted' ? '<span class="tag warn" title="Deleted for good: Sift cannot bring it back">can’t be undone</span>'
+        : x.kind === 'recycled' && !o.canPutBack ? '' : `<button class="linkbtn" data-back="${x.id}">${UNDO_TEXT[x.kind]}</button>`;
+    return `<div class="li"><span class="tag ${x.kind === 'deleted' ? 'warn' : ''}">${KIND_TEXT[x.kind] || x.kind}</span>
+      <span class="p" title="${esc(x.path + where)}\n${esc(x.reason)}">${esc(x.path + where)}</span>
+      <span class="m" title="${esc(fullDate(x.at))}">${size(x.size)} · ${ago(x.at)}</span>${undo}</div>`;
+  };
+  main.innerHTML = header('History', `${nf.format(rem.length)} step${rem.length === 1 ? '' : 's'} · ${size(freed)} taken off the disk`) + `<div class="page">
+    <div class="card wide"><h2>What Sift did to files</h2><p class="hint">Newest first. Put back, move back and rename back undo a step as long as the file is still where Sift left it. A permanent delete can’t be undone.</p>
+      <div class="list">${rem.length ? rem.slice(0, 1000).map(entry).join('') : '<div class="empty-list">Nothing done yet.</div>'}</div></div>
+    <div class="card wide"><h2>Scans</h2>
+      <div class="list">${o.scans.length ? o.scans.map((s) => `<div class="li">
+        <span class="p" title="${esc(s.folders)}">${esc(fullDate(s.startedAt))}${s.cancelled ? ' <span class="tag">stopped</span>' : ''}</span>
+        <span class="m">${nf.format(s.filesSeen)} files · ${size(s.bytesSeen)} · ${nf.format(s.oldCount)} old · ${nf.format(s.groupCount)} duplicate groups</span></div>`).join('') : '<div class="empty-list">No scans yet.</div>'}</div></div>
+  </div>`;
+  main.querySelectorAll('[data-back]').forEach((b) => (b.onclick = () => undoEntries([Number(b.dataset.back)])));
 }
 
 // ---------- Pages in the strip ----------
