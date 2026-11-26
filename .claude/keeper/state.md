@@ -15,6 +15,10 @@ The overview every conversation starts from. One screen; what is no longer true 
 - First try (2026-11-25): "way to liberal", columns not resizable, no global keep, filters not
   complete enough. Addressed the same day; waiting for the owner's next try.
 
+- Jobs as tabs with Set up › Results › Act, presets, folders per job, several scans at once,
+  a wide results table with a top bar, and acting per certainty level (move, rename, permanent
+  delete, dry run, History per kind) landed 2026-11-26 (#2, #3). Waiting for the owner's try.
+
 ## What the owner wants next, in their order
 
 1. Try old downloads and duplicates, and say what is off.
@@ -25,6 +29,11 @@ The overview every conversation starts from. One screen; what is no longer true 
 - The layout and slider defaults were Claude's picks, built; the owner judges them in use.
 
 ## Noticed, not yet raised or settled
+
+- With "As I selected", a group can lose every copy: Sift warns in the confirmation but does not
+  block it (the user decides every removal).
+- Old downloads on the Act step start at "Leave alone", so old files selected on Results do
+  nothing until that level is switched to "As I selected".
 
 - "Unused" leans on Windows' last-opened date, which Windows doesn't always keep up to date;
   if files show as unused that were opened lately, that is why.
