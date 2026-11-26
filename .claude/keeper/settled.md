@@ -114,3 +114,13 @@ Owner's answers, round three (2026-11-26), in short (full words in the backlog i
 - Folders: all folders ever added stay available; you tick the active ones and drag them in
   order. Each job has its own folder order.
 - Will send screenshots of the old tool's options: take the options and logic, never its look.
+
+Owner's answers on the old tool's options (2026-11-26):
+- "If its a option: permenet delete is also good." (Changes the hard line in CLAUDE.md; confirmed as
+  part of the proposal before CLAUDE.md is touched.)
+- Moving removed / kept files: "Yes, just take all the actions as given in DupeNoMore, that works well."
+- Rename the kept file to a clean name: "Yea, good plan!"
+- One action per certainty level: "Yea, like dupeNoMore works. Its actualy brillant."
+- Reviewed, kept with the saved results: "Yea."
+- "ALso filters on visibilty. So only whats visible throuhg filters gets selected by modifiers. - if
+  certain files are not seen, selection modifiers are not aplied."
